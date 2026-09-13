@@ -31,3 +31,24 @@
   audio backend, prints a clear "no backend found" message and exits 1.
 - Next tick: keep the rest of the roadmap honest — likely the
   `paw-sound --pack forest` follow-up, or move on to `paw-read`.
+
+## 2026-09-13 — `paw-sound` grows a second pack: `forest`
+
+- Added a second sound pack, `forest`, that proves the pack-discovery
+  abstraction from the first tick is real — no API changes were needed.
+- `forest` is layered ambient synth (low-pass noise wind, a short bird
+  chirp with downward pitch, a soft cricket pulse, a bell with two
+  harmonics and exponential decay). All stdlib — `wave`, `struct`,
+  `math`, `random`. About 0.9–1.5s per cue.
+- Added `whisperpaw/_synth_forest.py` mirroring `_synth_sounds.py`.
+- Added `forest` to `KNOWN_PACKS` and made the `--pack` help text
+  generate from the registry instead of hardcoding "cat".
+- Added 8 new tests in `tests/test_forest_pack.py` covering pack
+  registration, event coverage, file format, duration bound, runtime
+  resolution, and idempotency of the synth script.
+- Total: **25/25 tests green**.
+- One small refactor along the way: the `--pack` help string used to be
+  a hardcoded "One of: cat" — now it's derived from `KNOWN_PACKS` so
+  the next pack won't need a doc change either.
+- Next tick: move on to `paw-read` (TTS). The shape will mirror
+  `paw-sound` — arg parser + OS backend picker + a few tests.

@@ -17,7 +17,7 @@ WhisperPaw is a small collection of command-line tools that make the terminal ki
 
 | Command | What it does | Status |
 | --- | --- | :---: |
-| `paw-sound` | Audio feedback for shell events: `meow` on success, `mrrp` on warning, `hiss` on error. | ✅ shipped |
+| `paw-sound` | Audio feedback for shell events: `meow` on success, `mrrp` on warning, `hiss` on error. Ships with two packs: `cat` (synth tones) and `forest` (layered ambient). | ✅ shipped |
 | `paw-read` | Reads selected text aloud via TTS (cross-platform). | 🐣 planned |
 | `paw-zoom` | Magnifies a chosen area of the screen (high-DPI helper). | 🐣 planned |
 | `paw-watch` | Watches a command's output and reads new lines aloud. | 🐣 planned |
@@ -39,6 +39,9 @@ paw-read
 # Play an "ok" sound after a successful build
 make && paw-sound ok || paw-sound fail
 
+# Use a softer forest pack instead of the default cat pack
+make && paw-sound --pack forest ok
+
 # Magnify the screen around your mouse cursor
 paw-zoom
 ```
@@ -54,11 +57,12 @@ paw-zoom
 ## 🛣️ Roadmap
 
 - [x] Repo scaffold + README
-- [ ] `paw-sound` — first concrete tool
+- [x] `paw-sound` — first concrete tool (cat pack)
+- [x] `paw-sound` forest pack — second sound pack, same API
 - [ ] `paw-read` — TTS wrapper
 - [ ] `paw-zoom` — screen magnifier
 - [ ] `paw-watch` — tail-and-read
-- [ ] Sound pack (cat / forest / rain / keyboard)
+- [ ] Sound pack: `rain` / `keyboard` (only if forest feels good)
 - [ ] Shell completions (bash / zsh / fish / nushell)
 - [ ] Homebrew formula + pip release
 

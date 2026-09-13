@@ -48,4 +48,5 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 <!-- TICK-LOG-START -->
 - 2026-09-13 — scaffold tick: package + CLI stubs + 2 tests green on py3.11–3.13, GitHub Actions wired. See `DEVLOG.md`.
 - 2026-09-13 — paw-sound: real implementation (5 events × 1 sound pack, cross-platform backends, 15 new tests, all 17 green). Shipped.
+- 2026-09-13 — paw-sound: added 'forest' pack (layered ambient synth), 8 new tests, all 25 green. Proved the pack-discovery API is real.
 <!-- TICK-LOG-END -->

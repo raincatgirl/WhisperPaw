@@ -37,7 +37,7 @@ SOUND_ROOT: Path = Path(__file__).resolve().parent / "sounds"
 #: Currently shipped sound packs. Each pack is a directory under
 #: :data:`SOUND_ROOT`. Adding a new pack is a matter of dropping files in
 #: and listing the pack name here.
-KNOWN_PACKS: frozenset[str] = frozenset({"cat"})
+KNOWN_PACKS: frozenset[str] = frozenset({"cat", "forest"})
 
 #: Events every pack is expected to support. The exact filename is found
 #: by scanning the pack directory; the first existing ``<event>.<ext>``
@@ -86,7 +86,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pack",
         default="cat",
-        help=f"Sound pack to use. One of: {', '.join(sorted(KNOWN_PACKS))} (default: cat).",
+        help=(
+            "Sound pack to use. One of: "
+            f"{', '.join(sorted(KNOWN_PACKS))} (default: cat)."
+        ),
     )
     parser.add_argument(
         "--volume",
