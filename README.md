@@ -15,12 +15,12 @@ WhisperPaw is a small collection of command-line tools that make the terminal ki
 
 ## ✨ What's inside
 
-| Command | What it does |
-| --- | --- |
-| `paw-read` | Reads selected text aloud via TTS (cross-platform). |
-| `paw-sound` | Audio feedback for shell events: `meow` on success, `mrrp` on warning, `hiss` on error. |
-| `paw-zoom` | Magnifies a chosen area of the screen (high-DPI helper). |
-| `paw-watch` | Watches a command's output and reads new lines aloud. |
+| Command | What it does | Status |
+| --- | --- | :---: |
+| `paw-sound` | Audio feedback for shell events: `meow` on success, `mrrp` on warning, `hiss` on error. | ✅ shipped |
+| `paw-read` | Reads selected text aloud via TTS (cross-platform). | 🐣 planned |
+| `paw-zoom` | Magnifies a chosen area of the screen (high-DPI helper). | 🐣 planned |
+| `paw-watch` | Watches a command's output and reads new lines aloud. | 🐣 planned |
 
 ## 🚀 Install
 
@@ -36,8 +36,8 @@ pip install whisperpaw
 # Read the clipboard aloud
 paw-read
 
-# Play a "compile failed" sound after a command
-make build && paw-sound ok || paw-sound fail
+# Play an "ok" sound after a successful build
+make && paw-sound ok || paw-sound fail
 
 # Magnify the screen around your mouse cursor
 paw-zoom
