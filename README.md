@@ -18,7 +18,7 @@ WhisperPaw is a small collection of command-line tools that make the terminal ki
 | Command | What it does | Status |
 | --- | --- | :---: |
 | `paw-sound` | Audio feedback for shell events: `meow` on success, `mrrp` on warning, `hiss` on error. Ships with two packs: `cat` (synth tones) and `forest` (layered ambient). | ✅ shipped |
-| `paw-read` | Reads selected text aloud via TTS (cross-platform). | 🐣 planned |
+| `paw-read` | Reads text aloud via TTS (cross-platform). Accepts a positional arg, `--file`, `--clipboard`, or stdin. Uses `say` / `spd-say` / `espeak` / PowerShell SAPI. | ✅ shipped |
 | `paw-zoom` | Magnifies a chosen area of the screen (high-DPI helper). | 🐣 planned |
 | `paw-watch` | Watches a command's output and reads new lines aloud. | 🐣 planned |
 
@@ -34,7 +34,10 @@ pip install whisperpaw
 
 ```bash
 # Read the clipboard aloud
-paw-read
+paw-read --clipboard
+
+# Read a file aloud at a faster rate
+paw-read --rate 280 --file notes.md
 
 # Play an "ok" sound after a successful build
 make && paw-sound ok || paw-sound fail
@@ -59,9 +62,9 @@ paw-zoom
 - [x] Repo scaffold + README
 - [x] `paw-sound` — first concrete tool (cat pack)
 - [x] `paw-sound` forest pack — second sound pack, same API
-- [ ] `paw-read` — TTS wrapper
+- [x] `paw-read` — TTS via OS engine (say / spd-say / espeak / SAPI)
 - [ ] `paw-zoom` — screen magnifier
-- [ ] `paw-watch` — tail-and-read
+- [ ] `paw-watch` — tail-and-read (will build on paw-read)
 - [ ] Sound pack: `rain` / `keyboard` (only if forest feels good)
 - [ ] Shell completions (bash / zsh / fish / nushell)
 - [ ] Homebrew formula + pip release

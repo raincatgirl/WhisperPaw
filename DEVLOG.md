@@ -52,3 +52,37 @@
   the next pack won't need a doc change either.
 - Next tick: move on to `paw-read` (TTS). The shape will mirror
   `paw-sound` — arg parser + OS backend picker + a few tests.
+
+## 2026-09-13 — `paw-read` ships
+
+- Implemented `whisperpaw.read` end-to-end: arg parser, source
+  resolver (positional → clipboard → file → stdin), sentence-aware
+  text chunker, OS-aware TTS backend picker, and a CLI entry point
+  with documented exit codes.
+- Four TTS backends supported: macOS `say`, Linux `spd-say` then
+  `espeak`, Windows PowerShell `System.Speech.Synthesis`. No
+  third-party dependencies — pure stdlib.
+- Clipboard support: `pbpaste` (macOS) → `wl-paste` / `xclip` / `xsel`
+  (Linux) → PowerShell `Get-Clipboard` (Windows). Graceful error if
+  no backend is available.
+- Long text is split on `. `, `! `, `? `, `。`, `！`, `？`, and blank
+  lines, never breaking a single word. Reassembly is lossless
+  (verified by test).
+- Added 27 new tests in `tests/test_read.py` covering: every CLI flag,
+  source resolution paths (incl. clipboard-missing failure mode),
+  chunking (short / sentence / giant word / empty / whitespace),
+  backend detection on all four OS paths, exit-code propagation,
+  empty-text error path.
+- Hit and fixed two real issues while writing tests:
+  1. argparse `dest` defaulted to `clipboard` instead of
+     `use_clipboard` → added explicit `dest="use_clipboard"`.
+  2. pytest's stdin capture raised `OSError` whenever `main()` was
+     called in a test → added `WPAW_READ_STDIN_OVERRIDE` env-var
+     short-circuit in `_read_stdin()`, set by `tests/conftest.py`.
+- Total: **59/59 tests green**.
+- Behaviour: pure stdlib, no telemetry, no network. On a system with
+  no TTS backend, prints "no TTS backend found" + which binaries it
+  tried, exits 1.
+- Next tick: `paw-watch` (tail a command, read new lines aloud via
+  `paw-read`). Will be a thin shell-out / subprocess wrapper that
+  speaks through the same code path.
