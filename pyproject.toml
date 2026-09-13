@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whisperpaw"
+version = "0.0.1"
+description = "A terminal accessibility toolkit — read aloud, sound feedback, gentle zoom."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Raincatgirl" }]
+keywords = ["accessibility", "tts", "terminal", "a11y", "audio"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Utilities",
+]
+
+[project.scripts]
+paw-read  = "whisperpaw.read:main"
+paw-sound = "whisperpaw.sound:main"
+paw-zoom  = "whisperpaw.zoom:main"
+paw-watch = "whisperpaw.watch:main"
+
+[project.urls]
+Homepage = "https://github.com/raincatgirl/WhisperPaw"
+Issues   = "https://github.com/raincatgirl/WhisperPaw/issues"
