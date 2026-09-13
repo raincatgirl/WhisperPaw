@@ -18,7 +18,7 @@ WhisperPaw is a small collection of command-line tools that make the terminal ki
 | Command | What it does | Status |
 | --- | --- | :---: |
 | `paw-sound` | Audio feedback for shell events: `meow` on success, `mrrp` on warning, `hiss` on error. Ships with two packs: `cat` (synth tones) and `forest` (layered ambient). | ✅ shipped |
-| `paw-read` | Reads text aloud via TTS (cross-platform). Accepts a positional arg, `--file`, `--clipboard`, or stdin. Uses `say` / `spd-say` / `espeak` / PowerShell SAPI. | ✅ shipped |
+| `paw-read` | Reads text aloud via TTS. Accepts a positional arg, `--file`, `--clipboard`, or stdin. Backends: macOS `say` / Linux `spd-say`/`espeak` / Windows SAPI, plus optional **Piper** for high-quality local neural voices. | ✅ shipped |
 | `paw-zoom` | Magnifies a chosen area of the screen (high-DPI helper). | 🐣 planned |
 | `paw-watch` | Watches a command's output and reads new lines aloud. | 🐣 planned |
 
@@ -38,6 +38,12 @@ paw-read --clipboard
 
 # Read a file aloud at a faster rate
 paw-read --rate 280 --file notes.md
+
+# High-quality neural voice via Piper (auto-discover ~/.local/share/piper/voices)
+paw-read --backend piper "this sounds way more natural"
+
+# Or point Piper at a specific voice model
+paw-read --backend piper --piper-voice ~/voices/en_US-amy-low.onnx "specific voice"
 
 # Play an "ok" sound after a successful build
 make && paw-sound ok || paw-sound fail

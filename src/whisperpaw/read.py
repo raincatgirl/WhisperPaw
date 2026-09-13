@@ -89,6 +89,26 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--backend",
+        default="auto",
+        choices=("auto", "piper", "system"),
+        help=(
+            "TTS backend to use. 'auto' picks the first available system engine "
+            "(say / spd-say / espeak / SAPI). 'piper' uses local Piper TTS "
+            "(requires --piper-voice). 'system' is the same as 'auto' but "
+            "skips Piper even if installed."
+        ),
+    )
+    parser.add_argument(
+        "--piper-voice",
+        default="auto",
+        help=(
+            "Path to a Piper .onnx voice model. Only used with --backend piper. "
+            "Use 'auto' to try a few well-known locations (~/.local/share/piper/"
+            "voices, /usr/share/piper/voices, ./voices). Default: auto."
+        ),
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help="Suppress the announcement line (still speaks).",
@@ -296,8 +316,181 @@ def _sapi_cmd(text: str, rate: float, volume: float) -> list[str]:
     return ["powershell", "-NoProfile", "-Command", script]
 
 
-def pick_backend() -> Callable[[str, float, float], int] | None:
-    """Return a function ``(text, rate, volume) -> exit_code`` or ``None``."""
+#: Well-known locations where Home Assistant / standalone installs place
+#: Piper voice models. Used when the user passes ``--piper-voice auto``.
+_PIPER_AUTO_PATHS: tuple[str, ...] = (
+    "~/.local/share/piper/voices",
+    "~/.config/piper/voices",
+    "/usr/share/piper/voices",
+    "/usr/local/share/piper/voices",
+    "./voices",
+)
+
+
+def _resolve_piper_voice(spec: str | None) -> str | None:
+    """Return an absolute path to a Piper .onnx voice, or ``None``.
+
+    ``spec`` is either a literal path, or ``"auto"`` / ``None``, in which
+    case the well-known search locations are tried and the first
+    ``*.onnx`` file found is returned.
+    """
+    if spec and spec != "auto":
+        return spec
+    import glob
+    import os
+    for d in _PIPER_AUTO_PATHS:
+        expanded = os.path.expanduser(d)
+        if not os.path.isdir(expanded):
+            continue
+        candidates = sorted(glob.glob(os.path.join(expanded, "*.onnx")))
+        if candidates:
+            return candidates[0]
+    return None
+
+
+def _piper_cmd(text: str, rate: float, volume: float, voice: str) -> list[str]:
+    """Build a ``piper`` invocation.
+
+    Piper reads text from stdin (one chunk per stdin write) and writes
+    raw 16-bit PCM to stdout (``--output-raw``). Playback is done out of
+    band by ``_piper_speak``, which pipes the PCM into the platform's
+    audio output (``aplay`` / ``afplay`` / powershell ``SoundPlayer``).
+
+    Rate mapping: Piper's ``--length_scale`` is inverse to speed.
+    At 200 WPM the baseline is 1.0; faster (higher WPM) -> smaller value.
+    Volume maps to ``--volume`` (Piper's 0..1 range maps cleanly to ours).
+    """
+    length_scale = max(0.5, min(2.0, 200.0 / max(80.0, rate)))
+    return [
+        "piper",
+        "--model", voice,
+        "--length_scale", f"{length_scale:.2f}",
+        "--volume", f"{max(0.0, min(1.0, volume)):.2f}",
+        "--output-raw",
+    ]
+
+
+def _piper_speak(text: str, rate: float, volume: float, voice: str) -> int:
+    """Run Piper on ``text`` and stream the raw PCM to the audio backend.
+
+    We need a two-stage pipe (piper -> aplay) that survives Piper's
+    ~1.5s first-token latency. The implementation:
+      1. Spawn Piper with stdout=PIPE
+      2. Spawn aplay (or platform equivalent) with stdin=PIPE
+      3. Copy Piper's stdout to aplay's stdin in a background thread
+      4. Wait for both; return aplay's exit code (the audible one)
+    """
+    piper_cmd = _piper_cmd(text, rate, volume, voice)
+    play_cmd = _pcm_playback_cmd()
+    if play_cmd is None:
+        print(
+            "paw-read: piper selected but no PCM playback tool found "
+            "(tried aplay / afplay / powershell)",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        piper_proc = subprocess.Popen(
+            piper_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+    except FileNotFoundError:
+        print(
+            "paw-read: --backend piper but 'piper' binary not found on PATH",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        play_proc = subprocess.Popen(
+            play_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+    except FileNotFoundError:
+        piper_proc.kill()
+        print(
+            f"paw-read: piper needs a PCM player but '{play_cmd[0]}' not found",
+            file=sys.stderr,
+        )
+        return 1
+    # We need to write text to Piper's stdin AND read its PCM out.
+    # Threading is the simplest correct way without going full async.
+    import threading
+    piper_stdin = piper_proc.stdin
+    if piper_stdin is not None:
+        try:
+            piper_stdin.write(text)
+            piper_stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+    pump_err: list[bytes] = []
+
+    def _pump() -> None:
+        try:
+            if piper_proc.stdout is not None and play_proc.stdin is not None:
+                while True:
+                    chunk = piper_proc.stdout.read(4096)
+                    if not chunk:
+                        break
+                    play_proc.stdin.write(chunk)
+                play_proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+    t = threading.Thread(target=_pump, daemon=True)
+    t.start()
+    piper_rc = piper_proc.wait(timeout=120)
+    t.join(timeout=5)
+    play_rc = play_proc.wait(timeout=120)
+    return play_rc if play_rc != 0 else piper_rc
+
+
+def _pcm_playback_cmd() -> list[str] | None:
+    """Return a command line that plays raw 16-bit little-endian 22050 Hz
+    mono PCM from stdin, or ``None`` if no player is available.
+    """
+    system = platform.system()
+    if system == "Linux":
+        # Piper's --output-raw defaults to 22050 Hz mono s16le. Tell aplay.
+        for tool, args in (
+            (["aplay", "-q", "-f", "S16_LE", "-r", "22050", "-c", "1"], None),
+        ):
+            if shutil.which(tool[0]):
+                return tool
+    if system == "Darwin" and shutil.which("afplay"):
+        # afplay doesn't take raw PCM flags; we route through a temp file.
+        return ["afplay", "-"]
+    if system == "Windows" and shutil.which("powershell"):
+        # PowerShell SoundPlayer doesn't take raw PCM; we use a temp file.
+        return ["powershell", "-NoProfile", "-Command", "$input"]
+    return None
+
+
+def pick_backend(
+    backend: str = "auto",
+    piper_voice: str | None = "auto",
+) -> Callable[..., int] | None:
+    """Return a function ``(text, rate, volume) -> exit_code`` or ``None``.
+
+    The ``backend`` argument selects between the local-Piper path and
+    the OS-system-engine chain:
+
+    * ``"auto"``  — try Piper first if installed + a voice is found,
+      else fall back to the system chain.
+    * ``"piper"`` — require Piper + a voice; return ``None`` if not.
+    * ``"system"`` — skip Piper, use the system chain (say / spd-say /
+      espeak / SAPI).
+    """
+    if backend in ("auto", "piper"):
+        if shutil.which("piper"):
+            voice_path = _resolve_piper_voice(piper_voice)
+            if voice_path is None:
+                if backend == "piper":
+                    return None  # caller will report the missing voice
+            else:
+                # Bind voice into a closure so _speak can pass only (text, rate, volume).
+                bound_voice = voice_path
+                def _piper_bound(text: str, rate: float, volume: float) -> int:
+                    return _piper_speak(text, rate, volume, bound_voice)
+                return _piper_bound
+    if backend == "piper":
+        return None  # explicit Piper request but nothing usable
     system = platform.system()
     if system == "Darwin" and shutil.which("say"):
         return _run_subprocess(_say_cmd)
@@ -311,7 +504,7 @@ def pick_backend() -> Callable[[str, float, float], int] | None:
     return None
 
 
-def _run_subprocess(builder: Callable[[str, float, float], list[str]]) -> Callable[[str, float, float], int]:
+def _run_subprocess(builder: Callable[..., list[str]]) -> Callable[..., int]:
     def _speak(text: str, rate: float, volume: float) -> int:
         cmd = builder(text, rate, volume)
         try:
@@ -326,16 +519,31 @@ def _run_subprocess(builder: Callable[[str, float, float], list[str]]) -> Callab
     return _speak
 
 
-def _speak(text: str, rate: float, volume: float) -> int:
-    backend = pick_backend()
-    if backend is None:
+def _speak(text: str, rate: float, volume: float, backend: str = "auto",
+          piper_voice: str | None = "auto") -> int:
+    chosen = pick_backend(backend, piper_voice)
+    if chosen is None:
+        if backend == "piper":
+            if not shutil.which("piper"):
+                print(
+                    "paw-read: --backend piper but 'piper' is not installed",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "paw-read: --backend piper but no .onnx voice model was "
+                    "found. Pass --piper-voice PATH or place a model in one of: "
+                    + ", ".join(_PIPER_AUTO_PATHS),
+                    file=sys.stderr,
+                )
+            return 2
         print(
             "paw-read: no TTS backend found "
-            f"(system={platform.system()}; tried say/spd-say/espeak/powershell)",
+            f"(system={platform.system()}; tried piper/say/spd-say/espeak/powershell)",
             file=sys.stderr,
         )
         return 1
-    return backend(text, rate, volume)
+    return chosen(text, rate, volume)
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +580,10 @@ def main(argv: list[str] | None = None) -> int:
 
     last_code = 0
     for chunk in chunks:
-        code = _speak(chunk, args.rate, args.volume)
+        code = _speak(
+            chunk, args.rate, args.volume,
+            backend=args.backend, piper_voice=args.piper_voice,
+        )
         if code != 0:
             last_code = code
     return last_code

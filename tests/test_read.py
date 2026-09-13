@@ -191,7 +191,7 @@ def test_chunk_whitespace_only() -> None:
 
 def test_main_with_text_succeeds(monkeypatch, capsys) -> None:
     spoken = []
-    monkeypatch.setattr(read, "_speak", lambda text, rate, volume: spoken.append(text) or 0)
+    monkeypatch.setattr(read, "_speak", lambda text, rate, volume, **_: spoken.append(text) or 0)
     code = read.main(["--quiet", "hello world"])
     assert code == 0
     assert spoken == ["hello world"]
@@ -200,7 +200,7 @@ def test_main_with_text_succeeds(monkeypatch, capsys) -> None:
 
 
 def test_main_default_prints_announcement(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(read, "_speak", lambda text, rate, volume: 0)
+    monkeypatch.setattr(read, "_speak", lambda text, rate, volume, **_: 0)
     code = read.main(["hi"])
     assert code == 0
     out = capsys.readouterr().out
@@ -208,7 +208,7 @@ def test_main_default_prints_announcement(monkeypatch, capsys) -> None:
 
 
 def test_main_propagates_speak_exit_code(monkeypatch) -> None:
-    monkeypatch.setattr(read, "_speak", lambda text, rate, volume: 1)
+    monkeypatch.setattr(read, "_speak", lambda text, rate, volume, **_: 1)
     code = read.main(["--quiet", "x"])
     assert code == 1
 
@@ -222,7 +222,7 @@ def test_main_empty_text_exits_with_usage_code(monkeypatch, capsys) -> None:
 
 def test_main_long_text_chunked(monkeypatch) -> None:
     spoken: list[str] = []
-    monkeypatch.setattr(read, "_speak", lambda text, rate, volume: spoken.append(text) or 0)
+    monkeypatch.setattr(read, "_speak", lambda text, rate, volume, **_: spoken.append(text) or 0)
     long = ". ".join(["sentence"] * 30) + "."  # ~300 chars
     code = read.main(["--quiet", "--max-chars", "50", long])
     assert code == 0
@@ -236,7 +236,7 @@ def test_main_long_text_chunked(monkeypatch) -> None:
 def test_pick_backend_returns_callable_for_darwin(monkeypatch) -> None:
     monkeypatch.setattr(read.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(read.shutil, "which", lambda name: "/usr/bin/say" if name == "say" else None)
-    backend = read.pick_backend()
+    backend = read.pick_backend("system", None)
     assert backend is not None
     assert callable(backend)
 
@@ -244,25 +244,25 @@ def test_pick_backend_returns_callable_for_darwin(monkeypatch) -> None:
 def test_pick_backend_returns_callable_for_linux_with_espeak(monkeypatch) -> None:
     monkeypatch.setattr(read.platform, "system", lambda: "Linux")
     monkeypatch.setattr(read.shutil, "which", lambda name: "/usr/bin/espeak" if name == "espeak" else None)
-    backend = read.pick_backend()
+    backend = read.pick_backend("system", None)
     assert backend is not None
 
 
 def test_pick_backend_returns_callable_for_linux_with_spd_say(monkeypatch) -> None:
     monkeypatch.setattr(read.platform, "system", lambda: "Linux")
     monkeypatch.setattr(read.shutil, "which", lambda name: "/usr/bin/spd-say" if name == "spd-say" else None)
-    backend = read.pick_backend()
+    backend = read.pick_backend("system", None)
     assert backend is not None
 
 
 def test_pick_backend_returns_callable_for_windows(monkeypatch) -> None:
     monkeypatch.setattr(read.platform, "system", lambda: "Windows")
     monkeypatch.setattr(read.shutil, "which", lambda name: "powershell" if name == "powershell" else None)
-    backend = read.pick_backend()
+    backend = read.pick_backend("system", None)
     assert backend is not None
 
 
 def test_pick_backend_returns_none_when_nothing_available(monkeypatch) -> None:
     monkeypatch.setattr(read.platform, "system", lambda: "Linux")
     monkeypatch.setattr(read.shutil, "which", lambda name: None)
-    assert read.pick_backend() is None
+    assert read.pick_backend("system", None) is None

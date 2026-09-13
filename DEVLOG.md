@@ -86,3 +86,38 @@
 - Next tick: `paw-watch` (tail a command, read new lines aloud via
   `paw-read`). Will be a thin shell-out / subprocess wrapper that
   speaks through the same code path.
+
+## 2026-09-13 — `paw-read` grows an optional Piper backend
+
+- Added `--backend {auto,piper,system}` and `--piper-voice PATH|auto`.
+- `auto` (default) tries Piper first if installed + a voice is
+  available, else falls back to the OS chain. `system` skips Piper
+  even if installed. `piper` requires Piper and a voice.
+- `_resolve_piper_voice("auto")` searches a small list of well-known
+  locations (~/.local/share/piper/voices, ~/.config/piper/voices,
+  /usr/share/piper/voices, /usr/local/share/piper/voices, ./voices) and
+  returns the first .onnx found.
+- Piper's output is raw 16-bit PCM at 22050 Hz mono. `_piper_speak`
+  uses two subprocesses (piper -> aplay/afplay/powershell) and a
+  background pump thread to keep the pipe alive across Piper's
+  ~1.5s first-token latency.
+- Rate is mapped from WPM to Piper's inverse `length_scale`:
+  `--length_scale = clamp(200 / rate, 0.5, 2.0)`.
+- Volume maps 0..1 directly to Piper's `--volume`.
+- Added 15 new tests in `tests/test_piper_backend.py` covering
+  command construction, arg parsing, picker branches (piper installed
+  but no voice, no piper at all, etc.), exit-code semantics for
+  missing-binary and missing-voice.
+- Hit one real bug while writing tests: monkey-patched `_speak` mocks
+  in the existing test_read.py needed `**_` to absorb the new
+  keyword args. Fixed.
+- Total: **74/74 tests green** (15 new + 59 existing).
+- Why Piper: among open-source on-device TTS engines, Piper has the
+  best voice quality (neural VITS/ONNX) and a permissive CLI. eSpeak
+  is faster (~ms latency) but robotic; Kokoro is higher quality but
+  bigger model and slower. Piper is the right opt-in for users who
+  care about voice naturalness and have already paid the model
+  download cost. We do not make it the default because most users
+  will not have Piper installed.
+- Next tick: `paw-watch` (tail a command, speak new lines). Or
+  another sound pack for `paw-sound`.

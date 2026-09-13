@@ -42,15 +42,20 @@ Legend: 🐣 planned · 🛠 in progress · ✅ shipped · 🐛 buggy
 
 ### `paw-read` design
 
-- Pure stdlib; no third-party deps.
+- Pure stdlib; no third-party runtime deps.
 - Sources, in priority order: positional arg → ``--clipboard`` →
   ``--file PATH`` → stdin.
-- TTS backends: ``say`` (macOS) → ``spd-say`` → ``espeak`` (Linux) →
-  PowerShell ``System.Speech.Synthesis`` (Windows).
+- TTS backends, in priority order: ``piper`` (if --backend piper and
+  a voice is available) → ``say`` (macOS) → ``spd-say`` → ``espeak``
+  (Linux) → PowerShell ``System.Speech.Synthesis`` (Windows).
+- Optional Piper path streams raw PCM through ``aplay`` / ``afplay`` /
+  PowerShell SoundPlayer, because Piper does not write directly to
+  an audio device.
 - Long text is split on sentence boundaries (English + CJK punctuation)
   before being sent to the backend; reassembly is lossless.
 - CLI: ``paw-read [text...] [--file FILE] [--clipboard] [--rate 80..600]
-  [--volume 0..1] [--max-chars N] [--quiet]``.
+  [--volume 0..1] [--max-chars N] [--backend auto|piper|system]
+  [--piper-voice PATH|auto] [--quiet]``.
 - Exit codes: 0 ok, 1 backend/env, 2 usage.
 
 ---
@@ -65,4 +70,5 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-13 — paw-sound: added 'forest' pack (layered ambient synth), 8 new tests, all 25 green. Proved the pack-discovery API is real.
 - 2026-09-13 — paw-read: real implementation (argparse, source resolver, sentence-boundary chunker, 4 cross-OS TTS backends, clipboard), 27 new tests, all 52 green. Shipped.
 - 2026-09-13 — fix: pytest conftest sets WPAW_READ_STDIN_OVERRIDE so main() tests don't trip stdin capture. +7 tests now green, 59/59 total.
+- 2026-09-13 — paw-read: optional Piper backend (--backend piper, --piper-voice). Auto-discovers ~/.local/share/piper/voices etc. 15 new tests, 74/74 green.
 <!-- TICK-LOG-END -->
