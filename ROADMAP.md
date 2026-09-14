@@ -67,7 +67,19 @@ Legend: 🐣 planned · 🛠 in progress · ✅ shipped · 🐛 buggy
 - Flags: `--rate` / `--volume` / `--max-chars` (forwarded to
   `paw-read`), `--max-lines N` (stop after N spoken lines; 0 = all),
   `--include-stderr` (merge stderr into the spoken stream),
+  `--follow` (stream stdout line-by-line instead of waiting for the
+  child to finish — useful for `tail -f`, `make watch`, `npm run dev`),
   `--quiet`.
+- Two execution paths:
+  - **batch** (default) uses `subprocess.run(..., capture_output=True)`
+    via the `_spawn` adapter. The whole output is collected first,
+    then walked through `_LineBuffer`.
+  - **streaming** (`--follow`) uses `subprocess.Popen(text=True,
+    bufsize=1)` via the `_popen` adapter and a tiny `_StreamProcess`
+    wrapper. `_LineBuffer` still does the partial-line accumulation,
+    so a write of `"hello\nwor"` then `"ld\n"` yields one spoken
+    line (`"hello world"`). After EOF we still call `wait()` so the
+    exit code is mirrored.
 - Line buffer accumulates partial lines, yields one complete line at
   a time, handles LF / CRLF, drops empty lines, strips whitespace.
 - Exit codes: 0 ok, 1 TTS error, 2 usage / no command / spawn error.
@@ -87,4 +99,5 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-13 — fix: pytest conftest sets WPAW_READ_STDIN_OVERRIDE so main() tests don't trip stdin capture. +7 tests now green, 59/59 total.
 - 2026-09-13 — paw-read: optional Piper backend (--backend piper, --piper-voice). Auto-discovers ~/.local/share/piper/voices etc. 15 new tests, 74/74 green.
 - 2026-09-14 — paw-watch: real implementation (subprocess wrapper, _LineBuffer, --max-lines, --include-stderr, reuses paw-read's TTS chain). 25 new tests, 99/99 green. Shipped.
+- 2026-09-14 — paw-watch: added --follow streaming mode (_popen + _StreamProcess adapters, line-by-line reading, exit code still mirrored) and fixed a latent _spawn ValueError bug surfaced by the new smoke tests. 15 new tests, 114/114 green.
 <!-- TICK-LOG-END -->

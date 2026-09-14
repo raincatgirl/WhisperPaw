@@ -5,6 +5,8 @@ Usage::
     paw-watch -- make              # run `make`, speak each new stdout line
     paw-watch --include-stderr -- pytest -q
     paw-watch --max-lines 5 -- seq 10
+    paw-watch --follow -- tail -f /var/log/syslog
+    paw-watch --follow --make watch
 
 Design
 ------
@@ -12,6 +14,14 @@ A thin subprocess wrapper that streams a child process's stdout (and
 optionally stderr) through the same TTS backend chain that
 :mod:`whisperpaw.read` uses. Each complete line of output is spoken as
 it arrives; partial lines are buffered until the next chunk or EOF.
+
+Two execution modes:
+
+- **batch** (default) — wait for the child to finish, then speak every
+  line in order. Best for short-lived commands (``make``, ``pytest``).
+- **streaming** (``--follow``) — open the child with ``Popen``, read
+  stdout line-by-line, and speak each one as it arrives. Best for
+  long-running watchers (``tail -f``, ``make watch``, ``npm run dev``).
 
 Why reuse ``paw-read`` rather than duplicate the backend picker:
 ``paw-read`` already knows about every OS-native TTS engine, already
@@ -96,6 +106,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--quiet",
         action="store_true",
         help="Suppress the announcement line (still speaks).",
+    )
+    parser.add_argument(
+        "--follow",
+        action="store_true",
+        help=(
+            "Stream the output instead of waiting for the command to finish: "
+            "each new line is spoken as it arrives, then the exit code is "
+            "mirrored. Useful for `tail -f`, `make watch`, `npm run dev`, etc."
+        ),
     )
     return parser
 
@@ -190,15 +209,75 @@ def _spawn(cmd: list[str], *, include_stderr: bool) -> subprocess.CompletedProce
 
     Stdout is captured as text; stderr is captured as text only when
     ``include_stderr`` is true (so we don't pay the cost otherwise).
+
+    When ``include_stderr`` is true we redirect stderr into stdout
+    (``stderr=STDOUT``) so the user gets a single ordered stream and we
+    never deadlock on a full stderr pipe. In that case we set
+    ``stdout=PIPE`` explicitly and skip ``capture_output``, because
+    ``capture_output=True`` is incompatible with a custom ``stderr=``.
     """
+    if include_stderr:
+        return subprocess.run(
+            cmd,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=None,
+        )
     return subprocess.run(
         cmd,
         check=False,
         capture_output=True,
         text=True,
         timeout=None,
-        stderr=subprocess.STDOUT if include_stderr else subprocess.PIPE,
     )
+
+
+class _StreamProcess:
+    """A tiny adapter over ``subprocess.Popen`` for the ``--follow`` path.
+
+    The default ``Popen`` object is already pretty close to what we want,
+    but wrapping it lets the tests substitute a deterministic fake without
+    having to import ``subprocess`` machinery. Two methods are enough:
+
+    - ``stdout_iter()`` yields one raw line at a time (with the trailing
+      ``\\n`` if present) and stops at EOF.
+    - ``wait()`` blocks until the child exits and returns the exit code.
+    """
+
+    __slots__ = ("_proc",)
+
+    def __init__(self, proc: "subprocess.Popen[str]") -> None:
+        self._proc = proc
+
+    def stdout_iter(self):
+        if self._proc.stdout is None:
+            return
+        for line in self._proc.stdout:
+            yield line
+
+    def wait(self) -> int:
+        return self._proc.wait()
+
+
+def _popen(cmd: list[str], *, include_stderr: bool) -> _StreamProcess:
+    """Start ``cmd`` in streaming mode and return a :class:`_StreamProcess`.
+
+    The child's stdout is opened as a text-mode pipe with line-buffering
+    (``bufsize=1``) so each ``for line in proc.stdout`` read returns at
+    most one line. Stderr is either captured separately (``include_stderr``
+    is false) or merged into stdout so the user gets a single ordered
+    stream and we never deadlock on a full stderr pipe.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT if include_stderr else subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    return _StreamProcess(proc)
 
 
 def _speak_line(line: str, rate: float, volume: float) -> int:
@@ -230,10 +309,14 @@ def main(argv: list[str] | None = None) -> int:
         return int(exc.code) if isinstance(exc.code, int) else 2
 
     if not args.quiet:
+        mode = "follow" if args.follow else "tail"
         preview = " ".join(args.cmd)
         if len(preview) > 60:
             preview = preview[:57] + "..."
-        print(f"🐾 paw-watch: tailing `{preview}`")
+        print(f"🐾 paw-watch: {mode}ing `{preview}`")
+
+    if args.follow:
+        return _run_streaming(args)
 
     # Spawn the watched process. FileNotFoundError (binary missing) is
     # mapped to exit 2 — this is a usage error from the user's side.
@@ -273,6 +356,67 @@ def main(argv: list[str] | None = None) -> int:
     # TTS error if there was one (more useful for debugging audio).
     if completed.returncode != 0:
         return completed.returncode
+    if tts_error:
+        return 1
+    return 0
+
+
+def _run_streaming(args: argparse.Namespace) -> int:
+    """``--follow`` mode: speak each new stdout line as the child produces it.
+
+    We open the child with :func:`_popen` and iterate ``stdout_iter()``
+    line-by-line, feeding each raw line to the same :class:`_LineBuffer`
+    the batch path uses. The buffer still does the partial-line
+    accumulation, so a write of ``"hello\\nwor"`` followed by ``"ld\\n"``
+    yields exactly one spoken line (``"hello world"``).
+
+    After the stream ends (EOF) we call ``wait()`` to collect the exit
+    code; if the child exited while we were still draining we already
+    have it, otherwise ``wait()`` blocks until the process actually
+    finishes. This matches the semantics users expect from ``tail -f``:
+    TTS stops as soon as the pipe closes, the process is reaped, and
+    its exit code is mirrored back to the shell.
+    """
+    try:
+        proc = _popen(args.cmd, include_stderr=args.include_stderr)
+    except FileNotFoundError as exc:
+        print(f"paw-watch: command not found: {exc.filename or args.cmd[0]}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"paw-watch: could not spawn {args.cmd[0]!r}: {exc}", file=sys.stderr)
+        return 2
+
+    buffer = _LineBuffer()
+    spoken = 0
+    tts_error = 0
+    max_lines = args.max_lines  # 0 == unlimited
+    try:
+        for raw_line in proc.stdout_iter():
+            for line in buffer.feed(raw_line):
+                if max_lines and spoken >= max_lines:
+                    break
+                code = _speak_line(line, args.rate, args.volume)
+                spoken += 1
+                if code != 0:
+                    tts_error = code
+            # Check inside the outer loop too so we stop reading the
+            # child as soon as we've hit the cap (don't keep draining
+            # a long-running process we no longer care about).
+            if max_lines and spoken >= max_lines:
+                break
+        # Trailing fragment without a newline still counts.
+        for line in buffer.flush():
+            if max_lines and spoken >= max_lines:
+                break
+            code = _speak_line(line, args.rate, args.volume)
+            spoken += 1
+            if code != 0:
+                tts_error = code
+    finally:
+        returncode = proc.wait()
+
+    if returncode != 0:
+        return returncode
     if tts_error:
         return 1
     return 0

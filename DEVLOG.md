@@ -172,3 +172,54 @@
   small improvement to an existing tool (e.g. a third `paw-sound`
   pack, or a `--follow` mode for `paw-watch` that streams rather
   than waits for the child to finish).
+
+## 2026-09-14 — `paw-watch` grows a `--follow` streaming mode
+
+- Added a `--follow` flag to `paw-watch`. Without it, the behaviour
+  is unchanged (batch: wait for the child to finish, then speak
+  every line). With it, `paw-watch` opens the child with
+  `subprocess.Popen(text=True, bufsize=1)`, iterates stdout
+  line-by-line, and speaks each new line as it arrives — useful for
+  `tail -f`, `make watch`, `npm run dev`, and any other long-running
+  watcher.
+- Implementation: a new `_popen` adapter and a tiny `_StreamProcess`
+  wrapper expose two methods, `.stdout_iter()` and `.wait()`. They
+  mirror the role of `_spawn` in the batch path so the rest of the
+  code (line buffer, speaking, exit-code mirroring, `--max-lines`,
+  `--include-stderr`, error handling) is shared and unchanged.
+- After EOF on stdout we still call `wait()` so the watched
+  command's exit code is mirrored — `paw-watch --follow -- make`
+  propagates `make`'s exit code just like the batch path does.
+- `--max-lines` works the same way: it stops reading from the child
+  as soon as the cap is hit, so we don't keep draining a long-running
+  process we no longer care about. The subprocess is reaped via
+  `wait()` in a `finally` block either way.
+- Hit and fixed a latent bug in the existing `_spawn` while writing
+  end-to-end smoke tests: it was passing both `capture_output=True`
+  and an explicit `stderr=` to `subprocess.run`, which CPython
+  rejects with `ValueError`. The fix splits the call into two
+  branches: the no-merge path uses `capture_output=True`; the
+  merge-stderr path uses explicit `stdout=PIPE, stderr=STDOUT`.
+  This bug was never caught by the existing tests because they all
+  monkey-patch `_spawn` and never call it for real.
+- Added 15 new tests in `tests/test_watch.py`:
+  - arg parsing for `--follow` (default off, combinable with other
+    flags)
+  - end-to-end tests of `_StreamProcess` against a real
+    `python -c` subprocess (line iteration, `wait()` exit code,
+    stderr-merge)
+  - `main()` with `--follow` uses `_popen` (regression: does
+    *not* call `_spawn`), speaks each line in order, respects
+    `--max-lines`, mirrors the child's exit code, propagates
+    TTS errors, flushes a trailing partial line, handles
+    `FileNotFoundError` (exit 2), and continues to use `_spawn`
+    in the default batch path.
+  - regression tests for the `_spawn` `ValueError` fix.
+- Total: **114/114 tests green** (15 new + 99 existing).
+- Behaviour: pure stdlib, no telemetry, no network. On a system
+  with no TTS backend, the streaming path prints the same
+  "no TTS backend found" message as the batch path and exits 1,
+  identical to `paw-read`.
+- Next tick: `paw-zoom` (TUI magnifier) is the only planned tool
+  left. It will likely take two ticks — one for the data model
+  and key-handling design, one for the actual render loop.
