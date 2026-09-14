@@ -22,11 +22,15 @@ classifiers = [
 ]
 
 [project.scripts]
-paw-read  = "whisperpaw.read:main"
-paw-sound = "whisperpaw.sound:main"
-paw-zoom  = "whisperpaw.zoom:main"
-paw-watch = "whisperpaw.watch:main"
+paw-read      = "whisperpaw.read:main"
+paw-sound     = "whisperpaw.sound:main"
+paw-zoom      = "whisperpaw.zoom:main"
+paw-watch     = "whisperpaw.watch:main"
+paw-complete  = "whisperpaw.complete:main"
 
 [project.urls]
 Homepage = "https://github.com/raincatgirl/WhisperPaw"
 Issues   = "https://github.com/raincatgirl/WhisperPaw/issues"
+
+[tool.setuptools.package-data]
+whisperpaw = ["sounds/*/*.wav", "completions/*"]

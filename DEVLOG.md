@@ -223,3 +223,92 @@
 - Next tick: `paw-zoom` (TUI magnifier) is the only planned tool
   left. It will likely take two ticks — one for the data model
   and key-handling design, one for the actual render loop.
+
+## 2026-09-14 — `paw-complete` ships
+
+- Added a new entry point, `paw-complete`, that prints shell
+  completion code for every shipped `paw-*` tool. Supported shells:
+  bash, zsh, fish, nushell.
+- The completion text is **generated live from each tool's
+  `argparse.ArgumentParser`** by a new internal module,
+  `whisperpaw._completions`. The module introspects every parser
+  via the public-ish `_actions` attribute, extracts every long and
+  short flag plus its help text, and feeds those tuples into
+  per-shell renderers. Adding a new flag to a tool is automatically
+  reflected the next time `paw-complete` is run — no docstring
+  or static file to update by hand.
+- Four renderers, each tuned to that shell's real completion API:
+  - **bash** — emits a `complete -F` registration with a
+    `compgen -W` word list inside the per-tool function. The
+    function only fires when the user has typed `--` (the common
+    case for `paw-* --r<TAB>`); otherwise it returns immediately
+    so file completion still works for any positional.
+  - **zsh** — emits a `#compdef` header + an `_arguments -s`
+    block with `'--flag[help]'` entries. Drop the file in any
+    directory on `$fpath` and `compinit` will pick it up.
+  - **fish** — emits one `complete -c paw-<tool> -l <flag> -d
+    '<help>'` line per flag. Single file, drop it into
+    `~/.config/fish/completions/`.
+  - **nushell** — emits `extern "paw-<tool>" [ --flag: string ]`
+    blocks, which is the documented nushell syntax for declaring
+    an external completer. Add the file's contents to `config.nu`
+    or `source` it.
+- Tools that are still stubs (currently `paw-zoom` — no
+  `build_parser()` yet) get a minimal "not implemented yet"
+  entry that still parses, so the user can source the file
+  without errors and the completion just no-ops for that tool.
+- Added 27 new tests in `tests/test_completions.py`:
+  - `list_tools()` returns the expected subcommand list
+  - `render(shell)` produces non-empty text for every shell
+  - The output is deterministic
+  - The output contains every known long flag for `paw-read`
+  - Each shell's output uses the right idiomatic API
+    (`complete -F` for bash, `#compdef` + `_arguments` for zsh,
+    `complete -c` for fish, `extern "<name>"` for nu)
+  - The stub tool (paw-zoom) renders a minimal but non-crashing
+    entry
+  - **The shipped static files under
+    `src/whisperpaw/completions/` are byte-identical to the live
+    generator output** — the test that fails when you add a new
+    flag and forget to regenerate the static file
+  - `paw-complete` CLI: unknown shell exits 2, no args exits 2,
+    known shell prints the same text as `render()`, `--list-tools`
+    prints one tool name per line
+  - bash output passes `bash -n` (syntactic validity) when bash
+    is available on PATH
+  - bash output has balanced braces (a cheap structural check
+    that works even when bash isn't installed)
+- Hit and fixed two real bugs while writing the tests:
+  1. The first draft of the bash renderer joined flags as
+     `'--flag' '--flag'` (separate double-quoted tokens), which
+     `compgen -W` would have treated as one giant string. Fixed
+     to a literal space-separated list — compgen then does the
+     right thing.
+  2. The help-text truncation used `text.split(".")[0]`, which
+     broke on any range like `0.0–1.0` or version number
+     `0.0.1`. Replaced with a real sentence-boundary detector
+     that only chops on `". "`, `"! "`, or `"? "`. Output now
+     shows the full range and the default value.
+- The nushell renderer's first attempt emitted a `def "<name>"
+  []` block, which is the wrong API — that *defines* a nushell
+  function with that name, shadowing the real external binary.
+  Replaced with the correct `extern "<name>" [ --flag: string ]`
+  syntax, which declares a completer without redefining the
+  command.
+- Shipped the four static completion files (bash, zsh, fish, nu)
+  in `src/whisperpaw/completions/` along with a `README.md` that
+  documents the per-shell install steps. The static files are
+  included in the wheel via `package-data`, so `pip install
+  whisperpaw` puts them at
+  `<site-packages>/whisperpaw/completions/`.
+- Total: **141/141 tests green** (27 new + 114 existing).
+- Behaviour: pure stdlib, no telemetry, no network. The
+  generator runs locally in milliseconds — no introspection of
+  installed tools, no scanning of `$PATH`, nothing.
+- Next tick: `paw-zoom` is the only planned tool left and is a
+  meaningful step up in scope (TUI magnifier, cross-platform
+  screen capture, hotkeys) — likely 2–3 ticks of work before
+  it's ready to ship. Other reasonable directions while
+  waiting: a third `paw-sound` pack (`rain` / `keyboard`), or
+  moving paw-read's Piper backend into a documented separate
+  plugin path.

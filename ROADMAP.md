@@ -26,6 +26,7 @@ This document is the **single source of truth** for what WhisperPaw will be and 
 | `paw-sound` | ✅ shipped | Play short audio cues for shell events. |
 | `paw-read`  | ✅ shipped | Read text aloud (stdin / file / clipboard). |
 | `paw-watch` | ✅ shipped | Tail a command and speak new lines. |
+| `paw-complete` | ✅ shipped | Print shell completions (bash / zsh / fish / nushell) for every shipped tool, derived live from each tool's argparse parser. |
 | `paw-zoom`  | 🐣 planned | Magnify area around the cursor. |
 
 Legend: 🐣 planned · 🛠 in progress · ✅ shipped · 🐛 buggy
@@ -87,6 +88,32 @@ Legend: 🐣 planned · 🛠 in progress · ✅ shipped · 🐛 buggy
 
 ---
 
+### `paw-complete` design
+
+- Pure stdlib; no third-party runtime deps. Completions are derived
+  from each tool's `build_parser()` so they can never go stale.
+- Four shell renderers, each producing a self-contained file the
+  user can `source` or drop into the right directory:
+  - `bash` — `complete -F` with a `compgen -W` word list.
+  - `zsh` — `#compdef` + `_arguments` with `--flag[help]` syntax.
+  - `fish` — one `complete -c` line per flag.
+  - `nushell` — `extern "<tool>" [ --flag: string ]` blocks.
+- A test asserts the shipped static files in
+  `src/whisperpaw/completions/` are byte-identical to the live
+  generator output, so adding a new flag and forgetting to
+  regenerate is caught at `pytest` time.
+- Stub tools (no `build_parser()` yet, e.g. `paw-zoom`) get a
+  minimal "not implemented yet" entry that still parses — so
+  sourcing the file never errors.
+- CLI: `paw-complete {bash,zsh,fish,nu} [--list-tools]`.
+- Exit codes: 0 ok, 2 usage.
+
+### `paw-zoom` design
+
+_(TBD — still a stub.)_
+
+---
+
 ## 📅 Tick log
 
 A new entry is appended every time the cron job wakes up. This is the project's heartbeat.
@@ -100,4 +127,5 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-13 — paw-read: optional Piper backend (--backend piper, --piper-voice). Auto-discovers ~/.local/share/piper/voices etc. 15 new tests, 74/74 green.
 - 2026-09-14 — paw-watch: real implementation (subprocess wrapper, _LineBuffer, --max-lines, --include-stderr, reuses paw-read's TTS chain). 25 new tests, 99/99 green. Shipped.
 - 2026-09-14 — paw-watch: added --follow streaming mode (_popen + _StreamProcess adapters, line-by-line reading, exit code still mirrored) and fixed a latent _spawn ValueError bug surfaced by the new smoke tests. 15 new tests, 114/114 green.
+- 2026-09-14 — paw-complete: shell completions (bash / zsh / fish / nushell) generated live from each tool's argparse parser. 27 new tests, 141/141 green. Shipped.
 <!-- TICK-LOG-END -->

@@ -20,6 +20,7 @@ WhisperPaw is a small collection of command-line tools that make the terminal ki
 | `paw-sound` | Audio feedback for shell events: `meow` on success, `mrrp` on warning, `hiss` on error. Ships with two packs: `cat` (synth tones) and `forest` (layered ambient). | ✅ shipped |
 | `paw-read` | Reads text aloud via TTS. Accepts a positional arg, `--file`, `--clipboard`, or stdin. Backends: macOS `say` / Linux `spd-say`/`espeak` / Windows SAPI, plus optional **Piper** for high-quality local neural voices. | ✅ shipped |
 | `paw-watch` | Runs a command and speaks each line of its output. Two modes: default *batch* (wait for the child, then speak), or `--follow` for long-running watchers (`tail -f`, `make watch`). Supports `--max-lines`, `--include-stderr`. Reuses `paw-read`'s TTS chain. | ✅ shipped |
+| `paw-complete` | Prints shell-completion code (bash / zsh / fish / nushell) for every shipped `paw-*` tool, derived live from each tool's argparse parser. | ✅ shipped |
 | `paw-zoom` | Magnifies a chosen area of the screen (high-DPI helper). | 🐣 planned |
 
 ## 🚀 Install
@@ -62,6 +63,12 @@ paw-watch --include-stderr -- pytest -q
 paw-watch --follow -- tail -f /var/log/myapp.log
 paw-watch --follow --make watch
 
+# Enable Tab-completion for your shell (regenerate from the live parsers)
+echo 'eval "$(paw-complete bash)"' >> ~/.bashrc
+paw-complete zsh > ~/.zfunc/_paw
+paw-complete fish > ~/.config/fish/completions/paw-read.fish
+paw-complete nu >> ~/.config/nushell/config.nu
+
 # Magnify the screen around your mouse cursor
 paw-zoom
 ```
@@ -82,9 +89,9 @@ paw-zoom
 - [x] `paw-read` — TTS via OS engine (say / spd-say / espeak / SAPI)
 - [x] `paw-read` — optional Piper backend (high-quality neural voice)
 - [x] `paw-watch` — tail-and-read (reuses paw-read)
+- [x] Shell completions (bash / zsh / fish / nushell) — `paw-complete`
 - [ ] `paw-zoom` — screen magnifier
 - [ ] Sound pack: `rain` / `keyboard` (only if forest feels good)
-- [ ] Shell completions (bash / zsh / fish / nushell)
 - [ ] Homebrew formula + pip release
 
 See [`ROADMAP.md`](./ROADMAP.md) for the full plan and per-tick progress.
