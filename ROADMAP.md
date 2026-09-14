@@ -128,4 +128,5 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-14 — paw-watch: real implementation (subprocess wrapper, _LineBuffer, --max-lines, --include-stderr, reuses paw-read's TTS chain). 25 new tests, 99/99 green. Shipped.
 - 2026-09-14 — paw-watch: added --follow streaming mode (_popen + _StreamProcess adapters, line-by-line reading, exit code still mirrored) and fixed a latent _spawn ValueError bug surfaced by the new smoke tests. 15 new tests, 114/114 green.
 - 2026-09-14 — paw-complete: shell completions (bash / zsh / fish / nushell) generated live from each tool's argparse parser. 27 new tests, 141/141 green. Shipped.
+- 2026-09-14 — paw-sound: added 'rain' pack (rhythmic drops + thunder crack), 10 new tests, 151/151 green.
 <!-- TICK-LOG-END -->

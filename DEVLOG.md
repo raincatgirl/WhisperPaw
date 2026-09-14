@@ -122,6 +122,31 @@
 - Next tick: `paw-zoom` (TUI magnifier) — a meaningful step up in
   scope. Or another small sound pack for `paw-sound`.
 
+## 2026-09-14 — `paw-sound` grows a third pack: `rain`
+
+- Added `rain` to `KNOWN_PACKS` and shipped a new
+  `_synth_rain.py` + 5 generated `.wav` files. Same zero-touch
+  pattern as `forest`: register name, generate files, done.
+- The pack is *rhythmic* where `forest` is *breathy* — a Poisson-
+  like schedule of short transient drops, plus a low-pass noise
+  "sky drone" and a 60/90/130 Hz rumble that lands on the `ready`
+  cue as a thunder crack after a brief silence.
+- Per-event character:
+  - `ok`    — light steady drizzle, 18 drops/sec
+  - `warn`  — medium rain, 35 drops/sec + 3 heavy drops
+  - `fail`  — heavy rain, 80 drops/sec + 6 heavy drops + low rumble
+  - `ready` — sparse drops then a single thunder crack at t=0.55s
+  - `ding`  — one high-pitched drop (~1100 Hz) with a long tail
+- Pure stdlib. File sizes 35–66 KB. 10 new tests in
+  `tests/test_rain_pack.py` covering pack registration, event
+  coverage, format, duration bounds, **RMS non-equality between
+  `ok` and `fail` cues** (a sanity check that they aren't the
+  same audio under different names), resolve paths, help text,
+  and synth-script idempotency.
+- Total: **151/151 tests green** (10 new + 141 existing).
+- This is the smallest meaningful unit left in the spec. The only
+  remaining planned tool is `paw-zoom`, which is multi-tick scope.
+
 ## 2026-09-14 — `paw-watch` ships
 
 - Implemented `whisperpaw.watch` end-to-end: argparse with a `--`

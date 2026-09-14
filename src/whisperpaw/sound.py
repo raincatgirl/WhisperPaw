@@ -37,7 +37,7 @@ SOUND_ROOT: Path = Path(__file__).resolve().parent / "sounds"
 #: Currently shipped sound packs. Each pack is a directory under
 #: :data:`SOUND_ROOT`. Adding a new pack is a matter of dropping files in
 #: and listing the pack name here.
-KNOWN_PACKS: frozenset[str] = frozenset({"cat", "forest"})
+KNOWN_PACKS: frozenset[str] = frozenset({"cat", "forest", "rain"})
 
 #: Events every pack is expected to support. The exact filename is found
 #: by scanning the pack directory; the first existing ``<event>.<ext>``

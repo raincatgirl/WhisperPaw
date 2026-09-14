@@ -17,7 +17,7 @@ WhisperPaw is a small collection of command-line tools that make the terminal ki
 
 | Command | What it does | Status |
 | --- | --- | :---: |
-| `paw-sound` | Audio feedback for shell events: `meow` on success, `mrrp` on warning, `hiss` on error. Ships with two packs: `cat` (synth tones) and `forest` (layered ambient). | ✅ shipped |
+| `paw-sound` | Audio feedback for shell events: `meow` on success, `mrrp` on warning, `hiss` on error. Ships with three packs: `cat` (synth tones), `forest` (wind + birds + bells), and `rain` (rhythmic drops + thunder). | ✅ shipped |
 | `paw-read` | Reads text aloud via TTS. Accepts a positional arg, `--file`, `--clipboard`, or stdin. Backends: macOS `say` / Linux `spd-say`/`espeak` / Windows SAPI, plus optional **Piper** for high-quality local neural voices. | ✅ shipped |
 | `paw-watch` | Runs a command and speaks each line of its output. Two modes: default *batch* (wait for the child, then speak), or `--follow` for long-running watchers (`tail -f`, `make watch`). Supports `--max-lines`, `--include-stderr`. Reuses `paw-read`'s TTS chain. | ✅ shipped |
 | `paw-complete` | Prints shell-completion code (bash / zsh / fish / nushell) for every shipped `paw-*` tool, derived live from each tool's argparse parser. | ✅ shipped |
@@ -51,6 +51,9 @@ make && paw-sound ok || paw-sound fail
 
 # Use a softer forest pack instead of the default cat pack
 make && paw-sound --pack forest ok
+
+# Or a rainy pack
+paw-sound --pack rain ding
 
 # Tail a long build and hear each new line as it appears
 paw-watch --max-lines 20 -- make
@@ -86,6 +89,7 @@ paw-zoom
 - [x] Repo scaffold + README
 - [x] `paw-sound` — first concrete tool (cat pack)
 - [x] `paw-sound` forest pack — second sound pack, same API
+- [x] `paw-sound` rain pack — third pack (rhythmic drops + thunder)
 - [x] `paw-read` — TTS via OS engine (say / spd-say / espeak / SAPI)
 - [x] `paw-read` — optional Piper backend (high-quality neural voice)
 - [x] `paw-watch` — tail-and-read (reuses paw-read)
