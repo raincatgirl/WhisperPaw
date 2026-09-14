@@ -25,8 +25,8 @@ This document is the **single source of truth** for what WhisperPaw will be and 
 | --- | :---: | --- |
 | `paw-sound` | ✅ shipped | Play short audio cues for shell events. |
 | `paw-read`  | ✅ shipped | Read text aloud (stdin / file / clipboard). |
+| `paw-watch` | ✅ shipped | Tail a command and speak new lines. |
 | `paw-zoom`  | 🐣 planned | Magnify area around the cursor. |
-| `paw-watch` | 🐣 planned | Tail a command's output and read new lines. |
 
 Legend: 🐣 planned · 🛠 in progress · ✅ shipped · 🐛 buggy
 
@@ -58,6 +58,21 @@ Legend: 🐣 planned · 🛠 in progress · ✅ shipped · 🐛 buggy
   [--piper-voice PATH|auto] [--quiet]``.
 - Exit codes: 0 ok, 1 backend/env, 2 usage.
 
+### `paw-watch` design
+
+- Pure stdlib; no third-party runtime deps. The TTS chain (say /
+  spd-say / espeak / SAPI / Piper) is reused from `paw-read`.
+- Invocation: `paw-watch [flags] -- CMD [ARG ...]`. Everything after
+  `--` is the watched command; the user does not need a shell.
+- Flags: `--rate` / `--volume` / `--max-chars` (forwarded to
+  `paw-read`), `--max-lines N` (stop after N spoken lines; 0 = all),
+  `--include-stderr` (merge stderr into the spoken stream),
+  `--quiet`.
+- Line buffer accumulates partial lines, yields one complete line at
+  a time, handles LF / CRLF, drops empty lines, strips whitespace.
+- Exit codes: 0 ok, 1 TTS error, 2 usage / no command / spawn error.
+  The watched command's exit code is mirrored if it is non-zero.
+
 ---
 
 ## 📅 Tick log
@@ -71,4 +86,5 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-13 — paw-read: real implementation (argparse, source resolver, sentence-boundary chunker, 4 cross-OS TTS backends, clipboard), 27 new tests, all 52 green. Shipped.
 - 2026-09-13 — fix: pytest conftest sets WPAW_READ_STDIN_OVERRIDE so main() tests don't trip stdin capture. +7 tests now green, 59/59 total.
 - 2026-09-13 — paw-read: optional Piper backend (--backend piper, --piper-voice). Auto-discovers ~/.local/share/piper/voices etc. 15 new tests, 74/74 green.
+- 2026-09-14 — paw-watch: real implementation (subprocess wrapper, _LineBuffer, --max-lines, --include-stderr, reuses paw-read's TTS chain). 25 new tests, 99/99 green. Shipped.
 <!-- TICK-LOG-END -->

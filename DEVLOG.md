@@ -119,5 +119,56 @@
   care about voice naturalness and have already paid the model
   download cost. We do not make it the default because most users
   will not have Piper installed.
-- Next tick: `paw-watch` (tail a command, speak new lines). Or
-  another sound pack for `paw-sound`.
+- Next tick: `paw-zoom` (TUI magnifier) — a meaningful step up in
+  scope. Or another small sound pack for `paw-sound`.
+
+## 2026-09-14 — `paw-watch` ships
+
+- Implemented `whisperpaw.watch` end-to-end: argparse with a `--`
+  separator for the watched command, an explicit `_LineBuffer` for
+  partial-line accumulation, a `_spawn` adapter so tests can swap
+  the subprocess layer, and a `_speak_line` adapter that hands each
+  line to `paw_read._speak` (so we inherit the entire backend chain
+  for free — Piper, say, spd-say, espeak, SAPI).
+- Invocation: `paw-watch [--rate R] [--volume V] [--max-lines N]
+  [--include-stderr] [--quiet] -- CMD [ARG ...]`. The `--` is the
+  only way to start the command; the user does not need a shell,
+  which keeps things cross-platform.
+- Line buffer handles LF and CRLF, drops empty / whitespace-only
+  lines (they are not interesting to speak), and `flush()` returns
+  any trailing fragment without a newline so the user still hears the
+  last line of output.
+- `--include-stderr` redirects stderr to stdout at the subprocess
+  layer (so we never deadlock on a full stderr pipe). The user sees
+  one ordered stream.
+- `--max-lines N` stops speaking after N lines; the rest of the
+  output is read (so the child process never blocks) but dropped
+  before reaching TTS.
+- Exit codes: 0 ok, 1 TTS error, 2 usage / no command / spawn
+  error. If the watched command exits non-zero, that code is
+  mirrored back to the shell — useful for `paw-watch -- make &&
+  paw-sound ready` style chains.
+- Added 25 new tests in `tests/test_watch.py` covering: arg parsing
+  (with and without `--`), `--` separator handling, default
+  values, validation of `--rate` / `--volume` / `--max-lines`,
+  empty-command error path, `_LineBuffer` semantics (split, hold,
+  flush, CRLF, empty lines, whitespace), main() success path with
+  spoken-line list, exit-code mirroring from the child, TTS
+  exit-code propagation, `--max-lines` enforcement, empty-stdout
+  success, spawn-failure path, and `--include-stderr` merging.
+- One small refactor along the way: I first wrote a two-stream
+  list-of-streams main loop, then realised the real `_spawn` with
+  `stderr=STDOUT` always leaves `completed.stderr` empty, so the
+  "feed stderr too" branch was dead code. Simplified to a single
+  `buffer.feed(completed.stdout)` loop and updated the matching
+  test to match the real shape.
+- Total: **99/99 tests green** (25 new + 74 existing).
+- Behaviour: pure stdlib, no telemetry, no network. On a system with
+  no TTS backend, prints the same "no TTS backend found" message as
+  `paw-read` and exits 1.
+- Next tick: `paw-zoom` (TUI magnifier) is the only planned tool
+  left; it is a bigger piece of work — probably two ticks (one for
+  the data model + key handling, one for the actual render). Or a
+  small improvement to an existing tool (e.g. a third `paw-sound`
+  pack, or a `--follow` mode for `paw-watch` that streams rather
+  than waits for the child to finish).
