@@ -75,9 +75,26 @@ Legend: 🐣 planned · 🛠 in progress · ✅ shipped · 🐛 buggy
   an audio device.
 - Long text is split on sentence boundaries (English + CJK punctuation)
   before being sent to the backend; reassembly is lossless.
+- Public discovery helpers: :func:`whisperpaw.read.list_backends`
+  (returns ``["auto", "piper", "system"]`` in canonical order, derived
+  from :data:`whisperpaw.read.KNOWN_BACKENDS`) and
+  :func:`whisperpaw.read.list_voices` (returns the absolute paths of
+  every Piper ``*.onnx`` found under the well-known search locations in
+  :data:`whisperpaw.read._PIPER_AUTO_PATHS`, sorted, deduped). The
+  JSON shape is exposed as
+  :func:`whisperpaw.read.to_json("backends" | "voices")` so callers can
+  re-use the exact same serialisation the CLI uses. `list_voices`
+  accepts a ``search_paths`` override so tests can exercise the
+  discovery path without touching the real filesystem.
 - CLI: ``paw-read [text...] [--file FILE] [--clipboard] [--rate 80..600]
   [--volume 0..1] [--max-chars N] [--backend auto|piper|system]
-  [--piper-voice PATH|auto] [--quiet]``.
+  [--piper-voice PATH|auto] [--list-backends] [--list-voices]
+  [--json] [--quiet]``.
+- Discovery flags (``--list-backends`` / ``--list-voices``) short-circuit
+  before any source resolution or TTS playback, so they work on a
+  system with no TTS backend AND no text. ``--json`` without a
+  discovery flag is a usage error (exit 2 with a clear stderr message
+  naming both required flags).
 - Exit codes: 0 ok, 1 backend/env, 2 usage.
 
 ### `paw-watch` design
@@ -189,4 +206,5 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-15 — paw-sound: added --list-packs / --list-events discovery flags + public list_packs() / list_events() helpers; regenerated the four shell-completion static files. 9 new tests, 160/160 green.
 - 2026-09-15 — paw-zoom: ASCII proof-of-concept (data model + viewport math + magnification + source resolver + argparse). 38 new tests, 198/198 green. v0.1 shipped; real screen-capture render lands in a later tick.
 - 2026-09-15 — paw-sound: added --json output mode for the discovery flags + public to_json() helper. 12 new tests, 210/210 green.
+- 2026-09-15 — paw-read: added --list-backends / --list-voices discovery flags + public list_backends() / list_voices() helpers + to_json(); moved _PIPER_AUTO_PATHS up to the discovery section so both paths share one source of truth. 16 new tests, 233/233 green.
 <!-- TICK-LOG-END -->

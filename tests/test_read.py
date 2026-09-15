@@ -8,6 +8,7 @@ needed in CI.
 from __future__ import annotations
 
 import importlib
+import os
 
 import pytest
 
@@ -266,3 +267,217 @@ def test_pick_backend_returns_none_when_nothing_available(monkeypatch) -> None:
     monkeypatch.setattr(read.platform, "system", lambda: "Linux")
     monkeypatch.setattr(read.shutil, "which", lambda name: None)
     assert read.pick_backend("system", None) is None
+
+
+# --- discovery: list_backends / list_voices / to_json --------------------
+
+
+def test_list_backends_canonical_order() -> None:
+    """list_backends() returns the three known backends in canonical order."""
+    assert read.list_backends() == ["auto", "piper", "system"]
+
+
+def test_list_backends_matches_known_constant() -> None:
+    """The runtime list and KNOWN_BACKENDS must stay in lock-step."""
+    assert tuple(read.list_backends()) == read.KNOWN_BACKENDS
+
+
+def test_list_voices_returns_absolute_paths(tmp_path) -> None:
+    """list_voices() finds .onnx files under a custom search dir, as absolute paths."""
+    voices = tmp_path / "voices"
+    voices.mkdir()
+    (voices / "amy.onnx").write_bytes(b"")
+    (voices / "bob.onnx").write_bytes(b"")
+    # Add a non-onnx file that must be ignored.
+    (voices / "notes.txt").write_text("ignore me", encoding="utf-8")
+    found = read.list_voices(search_paths=(str(voices),))
+    assert len(found) == 2
+    for path in found:
+        assert os.path.isabs(path)
+        assert path.endswith(".onnx")
+    # Sorted alphabetically.
+    assert found == sorted(found)
+
+
+def test_list_voices_empty_when_no_search_dirs_match(tmp_path) -> None:
+    """A search path that doesn't exist yields an empty list (no error)."""
+    assert read.list_voices(search_paths=(str(tmp_path / "missing"),)) == []
+
+
+def test_list_voices_dedupes_when_paths_overlap(tmp_path) -> None:
+    """The same voice file referenced by two paths shows up once."""
+    voices = tmp_path / "voices"
+    voices.mkdir()
+    (voices / "amy.onnx").write_bytes(b"")
+    # Pass the same path twice under different spellings (one absolute,
+    # one not) — the dedup must collapse them into a single entry.
+    found = read.list_voices(
+        search_paths=(str(voices), str(voices.resolve()))
+    )
+    assert len(found) == 1
+
+
+def test_list_voices_ignores_non_onnx_files(tmp_path) -> None:
+    """Only files ending in .onnx are returned; .json / .txt are skipped."""
+    voices = tmp_path / "voices"
+    voices.mkdir()
+    (voices / "amy.onnx").write_bytes(b"")
+    (voices / "amy.onnx.json").write_text("{}", encoding="utf-8")
+    (voices / "config.txt").write_text("nope", encoding="utf-8")
+    found = read.list_voices(search_paths=(str(voices),))
+    assert found == [os.path.abspath(str(voices / "amy.onnx"))]
+
+
+def test_to_json_backends_round_trip() -> None:
+    """to_json('backends') produces a parseable JSON object with the right key."""
+    import json as _json
+    payload = _json.loads(read.to_json("backends"))
+    assert payload == {"backends": ["auto", "piper", "system"]}
+
+
+def test_to_json_voices_round_trip(tmp_path, monkeypatch) -> None:
+    """to_json('voices') produces a parseable JSON object whose voices
+    list is whatever list_voices() returned."""
+    import json as _json
+    voices = tmp_path / "v"
+    voices.mkdir()
+    (voices / "amy.onnx").write_bytes(b"")
+    monkeypatch.setattr(read, "_PIPER_AUTO_PATHS", (str(voices),))
+    payload = _json.loads(read.to_json("voices"))
+    assert "voices" in payload
+    assert isinstance(payload["voices"], list)
+    assert any(p.endswith("amy.onnx") for p in payload["voices"])
+
+
+def test_to_json_voices_empty_when_no_voices_installed(monkeypatch) -> None:
+    """to_json('voices') is a valid JSON object with an empty list when
+    no .onnx files are reachable."""
+    import json as _json
+    monkeypatch.setattr(read, "_PIPER_AUTO_PATHS", ("/nonexistent/voices",))
+    payload = _json.loads(read.to_json("voices"))
+    assert payload == {"voices": []}
+
+
+def test_to_json_single_line() -> None:
+    """The JSON output must be single-line so it pipes cleanly to jq."""
+    assert "\n" not in read.to_json("backends")
+    assert "\n" not in read.to_json("voices")
+
+
+def test_to_json_unknown_kind_raises() -> None:
+    """Unknown kind values raise ValueError (a programming error, not user)."""
+    with pytest.raises(ValueError):
+        read.to_json("not-a-kind")
+
+
+# --- discovery: CLI flags -------------------------------------------------
+
+
+def test_parse_args_list_backends_default_false() -> None:
+    args = read.parse_args([])
+    assert args.list_backends is False
+
+
+def test_parse_args_list_voices_default_false() -> None:
+    args = read.parse_args([])
+    assert args.list_voices is False
+
+
+def test_parse_args_json_default_false() -> None:
+    args = read.parse_args([])
+    assert args.as_json is False
+
+
+def test_main_list_backends_text_mode(capsys) -> None:
+    """--list-backends prints the three backends, one per line, exits 0."""
+    code = read.main(["--list-backends"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert out.strip().splitlines() == ["auto", "piper", "system"]
+
+
+def test_main_list_voices_text_mode(capsys, monkeypatch) -> None:
+    """--list-voices prints discovered voice paths, exits 0."""
+    monkeypatch.setattr(read, "_PIPER_AUTO_PATHS", ("/nonexistent",))
+    code = read.main(["--list-voices"])
+    out = capsys.readouterr().out
+    assert code == 0
+    # No voices on a system without Piper -> no lines printed, output is empty.
+    assert out == ""
+
+
+def test_main_list_backends_with_voice_arg_ignores_voice(capsys) -> None:
+    """--list-backends wins over a positional text argument."""
+    code = read.main(["--list-backends", "this would be the text"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "auto" in out and "piper" in out and "system" in out
+    # The text is never spoken — no "🐾 paw-read:" banner should appear.
+    assert "🐾 paw-read:" not in out
+
+
+def test_main_list_backends_json(capsys) -> None:
+    """--list-backends --json emits a parseable JSON object."""
+    import json as _json
+    code = read.main(["--list-backends", "--json"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert _json.loads(out) == {"backends": ["auto", "piper", "system"]}
+
+
+def test_main_list_voices_json(capsys, monkeypatch) -> None:
+    """--list-voices --json emits a parseable JSON object with a voices key."""
+    import json as _json
+    monkeypatch.setattr(read, "_PIPER_AUTO_PATHS", ("/nonexistent",))
+    code = read.main(["--list-voices", "--json"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert _json.loads(out) == {"voices": []}
+
+
+def test_main_list_backends_does_not_call_speak(monkeypatch, capsys) -> None:
+    """Discovery mode must never invoke the TTS backend."""
+    called = {"n": 0}
+
+    def _fake_speak(*args, **kwargs):
+        called["n"] += 1
+        return 0
+
+    monkeypatch.setattr(read, "_speak", _fake_speak)
+    code = read.main(["--list-backends"])
+    assert code == 0
+    assert called["n"] == 0
+
+
+def test_main_json_without_discovery_flag_exits_2(capsys) -> None:
+    """--json alone is a usage error (the user forgot --list-*)."""
+    code = read.main(["--json"])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "--json requires" in err
+    assert "--list-backends" in err
+    assert "--list-voices" in err
+
+
+def test_main_list_backends_no_text_source_needed(monkeypatch, capsys) -> None:
+    """--list-backends works on a system with no TTS backend AND no text."""
+    # Force the auto backend picker to find nothing — discovery should
+    # still succeed because it short-circuits before any TTS call.
+    monkeypatch.setattr(read, "pick_backend", lambda *a, **k: None)
+    monkeypatch.setenv("WPAW_READ_STDIN_OVERRIDE", "")
+    code = read.main(["--list-backends"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "auto" in out and "system" in out
+
+
+def test_main_text_mode_unchanged_by_discovery_flags(capsys, monkeypatch) -> None:
+    """Regression: the default text output for --list-backends is one
+    name per line, never a JSON object."""
+    code = read.main(["--list-backends"])
+    out = capsys.readouterr().out
+    assert code == 0
+    # The text path is one-name-per-line, so the output must NOT look
+    # like a JSON object (no leading '{', no closing '}').
+    assert "{" not in out
+    assert "}" not in out

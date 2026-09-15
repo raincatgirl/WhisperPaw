@@ -23,6 +23,9 @@ exits 1 — it does NOT install packages for you.
 from __future__ import annotations
 
 import argparse
+import glob
+import json
+import os
 import platform
 import shutil
 import subprocess
@@ -36,6 +39,86 @@ MIN_RATE: float = 80.0
 MAX_RATE: float = 600.0
 #: Default chunk size for long text — most engines can swallow ~200 chars.
 DEFAULT_MAX_CHARS: int = 200
+
+#: Backend names accepted by ``--backend``. The set is also exposed
+#: publicly via :func:`list_backends` so discovery and the CLI stay in
+#: lock-step with argparse's ``choices=`` list.
+KNOWN_BACKENDS: tuple[str, ...] = ("auto", "piper", "system")
+
+
+# ---------------------------------------------------------------------------
+# Public discovery API
+# ---------------------------------------------------------------------------
+
+#: Well-known locations where Home Assistant / standalone installs place
+#: Piper voice models. Used both by :func:`list_voices` (discovery) and
+#: :func:`_resolve_piper_voice` (the actual TTS path). Keeping a single
+#: source of truth means adding a search path is a one-line change.
+_PIPER_AUTO_PATHS: tuple[str, ...] = (
+    "~/.local/share/piper/voices",
+    "~/.config/piper/voices",
+    "/usr/share/piper/voices",
+    "/usr/local/share/piper/voices",
+    "./voices",
+)
+
+
+def list_backends() -> list[str]:
+    """Return the supported TTS backend names, in canonical order.
+
+    Mirrors :data:`KNOWN_BACKENDS`. Public so ``paw-complete`` and tests
+    can enumerate what's available without depending on the ``argparse``
+    layer. The output of :func:`to_json` is derived from this list.
+    """
+    return list(KNOWN_BACKENDS)
+
+
+def list_voices(*, search_paths: tuple[str, ...] | None = None) -> list[str]:
+    """Return the absolute paths of every Piper ``*.onnx`` voice found.
+
+    Searches the well-known Piper install locations (see
+    :data:`_PIPER_AUTO_PATHS`) by default and returns each ``*.onnx`` as
+    an absolute path, sorted. The list is empty if Piper is not
+    installed anywhere reachable.
+
+    The ``search_paths`` override exists for tests so the discovery path
+    is exercisable without touching the real filesystem.
+    """
+    paths = search_paths if search_paths is not None else _PIPER_AUTO_PATHS
+    seen: set[str] = set()
+    out: list[str] = []
+    for d in paths:
+        expanded = os.path.expanduser(d)
+        if not os.path.isdir(expanded):
+            continue
+        for cand in sorted(glob.glob(os.path.join(expanded, "*.onnx"))):
+            abs_path = os.path.abspath(cand)
+            if abs_path in seen:
+                continue
+            seen.add(abs_path)
+            out.append(abs_path)
+    return out
+
+
+def to_json(kind: str) -> str:
+    """Return the requested discovery data as a JSON string.
+
+    ``kind`` is either ``"backends"`` or ``"voices"``. The output is a
+    compact, single-line JSON object with one key, so it can be
+    diffed, piped to ``jq``, or stored as a build artefact without
+    further parsing.
+
+    Raises :class:`ValueError` for unknown ``kind`` values.
+    """
+    if kind == "backends":
+        payload = {"backends": list_backends()}
+    elif kind == "voices":
+        payload = {"voices": list_voices()}
+    else:
+        raise ValueError(
+            f"unknown kind {kind!r}; expected 'backends' or 'voices'"
+        )
+    return json.dumps(payload, sort_keys=True, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--backend",
         default="auto",
-        choices=("auto", "piper", "system"),
+        choices=KNOWN_BACKENDS,
         help=(
             "TTS backend to use. 'auto' picks the first available system engine "
             "(say / spd-say / espeak / SAPI). 'piper' uses local Piper TTS "
@@ -106,6 +189,37 @@ def build_parser() -> argparse.ArgumentParser:
             "Path to a Piper .onnx voice model. Only used with --backend piper. "
             "Use 'auto' to try a few well-known locations (~/.local/share/piper/"
             "voices, /usr/share/piper/voices, ./voices). Default: auto."
+        ),
+    )
+    parser.add_argument(
+        "--list-backends",
+        action="store_true",
+        dest="list_backends",
+        help=(
+            "Print the names of every supported TTS backend, one per line, "
+            "and exit. Nothing is spoken. Useful for discovery and for "
+            "shell completion."
+        ),
+    )
+    parser.add_argument(
+        "--list-voices",
+        action="store_true",
+        dest="list_voices",
+        help=(
+            "Print the absolute path of every Piper .onnx voice model found "
+            "in the well-known search locations, one per line, and exit. "
+            "Nothing is spoken. Useful for discovery and for shell completion."
+        ),
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help=(
+            "Combine with --list-backends or --list-voices to emit a JSON "
+            "object instead of one-name-per-line text. The object has one "
+            "key ('backends' or 'voices') whose value is the list. Nothing "
+            "is spoken. Useful for jq / scripts / build artefacts."
         ),
     )
     parser.add_argument(
@@ -318,13 +432,9 @@ def _sapi_cmd(text: str, rate: float, volume: float) -> list[str]:
 
 #: Well-known locations where Home Assistant / standalone installs place
 #: Piper voice models. Used when the user passes ``--piper-voice auto``.
-_PIPER_AUTO_PATHS: tuple[str, ...] = (
-    "~/.local/share/piper/voices",
-    "~/.config/piper/voices",
-    "/usr/share/piper/voices",
-    "/usr/local/share/piper/voices",
-    "./voices",
-)
+#: (The full definition lives in the discovery section above; this
+#: comment exists only so the chunk in :func:`_resolve_piper_voice`
+#: still reads naturally.)
 
 
 def _resolve_piper_voice(spec: str | None) -> str | None:
@@ -554,6 +664,35 @@ def _speak(text: str, rate: float, volume: float, backend: str = "auto",
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(argv)
+    except SystemExit as exc:
+        # argparse / explicit validation raised SystemExit already
+        return int(exc.code) if isinstance(exc.code, int) else 2
+
+    # Discovery flags short-circuit before any source resolution or
+    # TTS playback — they are mutually exclusive with reading, and they
+    # do not need a text source or a working TTS engine.
+    if args.as_json and not (args.list_backends or args.list_voices):
+        print(
+            "paw-read: --json requires --list-backends or --list-voices",
+            file=sys.stderr,
+        )
+        return 2
+    if args.list_backends:
+        if args.as_json:
+            print(to_json("backends"))
+        else:
+            for name in list_backends():
+                print(name)
+        return 0
+    if args.list_voices:
+        if args.as_json:
+            print(to_json("voices"))
+        else:
+            for path in list_voices():
+                print(path)
+        return 0
+
+    try:
         text = resolve_source(
             text=args.text,
             file=args.file,

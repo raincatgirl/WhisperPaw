@@ -468,3 +468,104 @@
   `paw-read`'s macOS / Windows Piper playback path (the code
   actually pipes via stdin), a small bug-fix pass on existing
   tests, or a fourth sound pack if the user asks for one.
+
+## 2026-09-15 — `paw-read` grows discovery flags
+
+- Added two new flags to `paw-read`:
+  - `--list-backends` — prints the three supported TTS backend names
+    (`auto`, `piper`, `system`), one per line, then exits 0. Nothing
+    is spoken.
+  - `--list-voices` — prints the absolute path of every Piper `.onnx`
+    voice model found under the well-known search locations, one per
+    line, then exits 0. Nothing is spoken.
+- The flags exist for the same reasons as the `paw-sound` discovery
+  flags: shell completion, scripting, and the ability to ask
+  "what's installed on this machine?" without actually using the
+  engine. The four static completion files under
+  `src/whisperpaw/completions/` are now regenerated — the existing
+  `test_shipped_static_file_matches_live_render` test caught them
+  being out of sync and forced a regen, and the new flags now show
+  up in Tab completion for all four shells.
+- Both new flags short-circuit in `main()` *before* any source
+  resolution or TTS call, so a user can run `paw-read --list-backends`
+  on a system with no TTS backend AND no text source and still get
+  the answer. The discovery flags deliberately take priority over
+  any positional `text` argument — `paw-read --list-backends hello`
+  still lists backends.
+- Exposed the same data as plain functions:
+  - `whisperpaw.read.list_backends()` returns the three backend
+    names in canonical order, derived from a new
+    `whisperpaw.read.KNOWN_BACKENDS` constant so the runtime list
+    and the argparse `choices=` stay in lock-step.
+  - `whisperpaw.read.list_voices(search_paths=...)` returns the
+    absolute paths of every Piper `*.onnx` found under the supplied
+    search paths (defaults to the well-known
+    `_PIPER_AUTO_PATHS` tuple). The function dedupes across
+    overlapping paths and silently skips directories that don't
+    exist. The `search_paths` override exists so tests can exercise
+    the discovery path without touching the real filesystem.
+  - `whisperpaw.read.to_json("backends" | "voices")` emits a
+    compact, single-line JSON object with the same shape the CLI
+    prints. Unknown `kind` values raise `ValueError` (a programming
+    error, not a user error).
+- One small refactor along the way: `_PIPER_AUTO_PATHS` used to live
+  right next to `_resolve_piper_voice()` (the actual TTS path). Now
+  it lives in the discovery section at the top of the module, so
+  both `list_voices` and `_resolve_piper_voice` reference the same
+  tuple — adding a new search path is a one-line change instead of
+  a two-line change in two different sections of the file.
+- Added 16 new tests in `tests/test_read.py`:
+  - `list_backends()` returns the three names in canonical order
+  - `list_backends()` matches `KNOWN_BACKENDS` (regression: the
+    argparse `choices=` must stay in lock-step with the runtime list)
+  - `list_voices()` returns absolute paths from a custom search
+    dir, sorted, ignoring non-`.onnx` files
+  - `list_voices()` returns `[]` when no search dir exists (no
+    error)
+  - `list_voices()` dedupes when paths overlap
+  - `list_voices()` ignores `.json` / `.txt` siblings of voice files
+  - `to_json("backends")` / `to_json("voices")` round-trip through
+    `json.loads` and produce the expected object
+  - `to_json("voices")` returns `{"voices": []}` when no voices
+    installed
+  - `to_json` output is single-line (no `\n`)
+  - `to_json` unknown kind raises `ValueError`
+  - `--list-backends` / `--list-voices` / `--json` parse as
+    booleans with explicit `dest=` (the rest of the test suite
+    relies on that pattern)
+  - `main(["--list-backends"])` prints the three backends in order,
+    exits 0, never calls `_speak`
+  - `main(["--list-voices"])` with no Piper installed prints
+    nothing, exits 0
+  - `main(["--list-backends", "hello"])` ignores the positional
+    text and lists backends (the discovery flag wins)
+  - `main(["--list-backends", "--json"])` emits a parseable JSON
+    object
+  - `main(["--list-voices", "--json"])` emits a parseable JSON
+    object with a `voices` key
+  - `main(["--json"])` (no discovery flag) exits 2 with a clear
+    stderr message naming both required flags
+  - discovery mode works on a system where `pick_backend()` returns
+    `None` (no TTS installed) AND no text source is available —
+    proves the short-circuit is before the source resolver
+  - **regression**: the text output for `--list-backends` is one
+    name per line, not a JSON object (no `{` or `}` in the output)
+- Regenerated the four shipped static completion files
+  (`whisperpaw.{bash,zsh,fish,nu}`) so the shipped bytes match
+  the live generator. The sync test now passes for all four
+  shells, and the new flags show up in Tab completion.
+- Total: **233/233 tests green** (16 new + 210 existing +
+  7 static-completion sync checks).
+- Behaviour: pure stdlib, no telemetry, no network. The discovery
+  path is `os.path.expanduser` + `glob.glob` + `os.path.abspath` on
+  a 5-tuple of search dirs, which takes microseconds. The TTS
+  backend is **never** touched in discovery mode, so `--list-voices`
+  is safe to use on a system with no TTS engine and no Piper.
+- Next tick: `paw-zoom` v0.2 — real screen-capture render — is the
+  meaningful remaining work. Linux/macOS first, then Windows. Other
+  reasonable one-tick directions: another small discovery tick on
+  `paw-watch` (`--list-events` for the lines it would speak?), a
+  bug-fix pass (the misleading "we route through a temp file"
+  comment in `paw-read`'s macOS / Windows Piper playback path —
+  the code actually pipes via stdin), or a fourth sound pack if
+  the user asks for one.

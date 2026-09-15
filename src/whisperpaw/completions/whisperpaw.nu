@@ -19,6 +19,9 @@ extern "paw-read" [
     --max-chars: string  # Soft max chars per spoken chunk (default: 200).
     --backend: string  # TTS backend to use.
     --piper-voice: string  # Path to a Piper .onnx voice model.
+    --list-backends: string  # Print the names of every supported TTS backend, one per line, and exit.
+    --list-voices: string  # Print the absolute path of every Piper .onnx voice model found in the well-know…
+    --json: string  # Combine with --list-backends or --list-voices to emit a JSON object instead of…
     --quiet: string  # Suppress the announcement line (still speaks).
 ]
 

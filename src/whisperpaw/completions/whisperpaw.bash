@@ -10,13 +10,13 @@
 
 
 _paw_read_flags() {
-  COMPREPLY=(--file --clipboard --rate --volume --max-chars --backend --piper-voice --quiet)
+  COMPREPLY=(--file --clipboard --rate --volume --max-chars --backend --piper-voice --list-backends --list-voices --json --quiet)
 }
 _paw_complete_paw_read() {
   local cur prev
   cur="${COMP_WORDS[COMP_CWORD]}"
   if [[ "$cur" == --* ]]; then
-    COMPREPLY=($(compgen -W '--file --clipboard --rate --volume --max-chars --backend --piper-voice --quiet' -- "$cur"))
+    COMPREPLY=($(compgen -W '--file --clipboard --rate --volume --max-chars --backend --piper-voice --list-backends --list-voices --json --quiet' -- "$cur"))
     return 0
   fi
   # No subcommands; nothing else to complete.

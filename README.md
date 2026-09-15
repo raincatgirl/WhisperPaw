@@ -18,7 +18,7 @@ WhisperPaw is a small collection of command-line tools that make the terminal ki
 | Command | What it does | Status |
 | --- | --- | :---: |
 | `paw-sound` | Audio feedback for shell events: `meow` on success, `mrrp` on warning, `hiss` on error. Ships with three packs: `cat` (synth tones), `forest` (wind + birds + bells), and `rain` (rhythmic drops + thunder). | ✅ shipped |
-| `paw-read` | Reads text aloud via TTS. Accepts a positional arg, `--file`, `--clipboard`, or stdin. Backends: macOS `say` / Linux `spd-say`/`espeak` / Windows SAPI, plus optional **Piper** for high-quality local neural voices. | ✅ shipped |
+| `paw-read` | Reads text aloud via TTS. Accepts a positional arg, `--file`, `--clipboard`, or stdin. Backends: macOS `say` / Linux `spd-say`/`espeak` / Windows SAPI, plus optional **Piper** for high-quality local neural voices. Ships `--list-backends` / `--list-voices` + `--json` discovery flags. | ✅ shipped |
 | `paw-watch` | Runs a command and speaks each line of its output. Two modes: default *batch* (wait for the child, then speak), or `--follow` for long-running watchers (`tail -f`, `make watch`). Supports `--max-lines`, `--include-stderr`. Reuses `paw-read`'s TTS chain. | ✅ shipped |
 | `paw-complete` | Prints shell-completion code (bash / zsh / fish / nushell) for every shipped `paw-*` tool, derived live from each tool's argparse parser. | ✅ shipped |
 | `paw-zoom` | Magnifies a rectangular region of text (v0.1 ASCII proof-of-concept; real screen-capture render lands in a later tick). Pure stdlib. | ✅ shipped (v0.1) |
@@ -45,6 +45,12 @@ paw-read --backend piper "this sounds way more natural"
 
 # Or point Piper at a specific voice model
 paw-read --backend piper --piper-voice ~/voices/en_US-amy-low.onnx "specific voice"
+
+# Discover what's available without speaking anything
+paw-read --list-backends              # auto / piper / system
+paw-read --list-voices                # absolute paths of every Piper .onnx found
+paw-read --list-backends --json       # → {"backends": ["auto", "piper", "system"]} (for jq / scripts)
+paw-read --list-voices --json         # → {"voices": [...]} of every Piper voice discovered
 
 # Play an "ok" sound after a successful build
 make && paw-sound ok || paw-sound fail
@@ -107,6 +113,7 @@ paw-zoom --rows 10 --cols 40 --charset dot "short"
 - [x] Shell completions (bash / zsh / fish / nushell) — `paw-complete`
 - [x] `paw-zoom` — v0.1 ASCII proof-of-concept (data model + viewport math + magnification)
 - [x] `paw-sound` discovery flags (`--list-packs` / `--list-events`) + `--json` output
+- [x] `paw-read` discovery flags (`--list-backends` / `--list-voices`) + `--json` output
 - [ ] `paw-zoom` v0.2 — real screen-capture render (Linux/macOS first)
 - [ ] `paw-zoom` v0.3 — Windows render + global hotkey
 - [ ] Homebrew formula + pip release

@@ -17,6 +17,9 @@ complete -c paw-read -l volume -d 'Playback volume, 0.0–1.0 (default: 1.0; ign
 complete -c paw-read -l max-chars -d 'Soft max chars per spoken chunk (default: 200).'
 complete -c paw-read -l backend -d 'TTS backend to use.'
 complete -c paw-read -l piper-voice -d 'Path to a Piper .onnx voice model.'
+complete -c paw-read -l list-backends -d 'Print the names of every supported TTS backend, one per line, and exit.'
+complete -c paw-read -l list-voices -d 'Print the absolute path of every Piper .onnx voice model found in the well-know…'
+complete -c paw-read -l json -d 'Combine with --list-backends or --list-voices to emit a JSON object instead of…'
 complete -c paw-read -l quiet -d 'Suppress the announcement line (still speaks).'
 
 # Auto-generated completions for paw-sound.
