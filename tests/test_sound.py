@@ -220,3 +220,135 @@ def test_known_packs_includes_cat() -> None:
 def test_resolve_sound_unknown_pack_raises_value_error() -> None:
     with pytest.raises(ValueError):
         sound.resolve_sound("ok", pack="atlantis", sound_root=sound.SOUND_ROOT)
+
+
+# --- JSON output for discovery flags ------------------------------------
+
+
+def test_to_json_packs_returns_parseable_object() -> None:
+    """``to_json('packs')`` returns a JSON object with a 'packs' key."""
+    import json as _json
+    raw = sound.to_json("packs")
+    parsed = _json.loads(raw)
+    assert isinstance(parsed, dict)
+    assert "packs" in parsed
+    assert set(parsed["packs"]) == set(sound.list_packs())
+
+
+def test_to_json_events_returns_parseable_object() -> None:
+    """``to_json('events')`` returns a JSON object with an 'events' key,
+    in the canonical order (a JSON array preserves order)."""
+    import json as _json
+    raw = sound.to_json("events")
+    parsed = _json.loads(raw)
+    assert isinstance(parsed, dict)
+    assert parsed["events"] == sound.list_events()
+
+
+def test_to_json_packs_is_sorted() -> None:
+    """The 'packs' array is sorted alphabetically so the output is
+    stable across runs and platforms — callers can diff / cache it."""
+    import json as _json
+    raw = sound.to_json("packs")
+    parsed = _json.loads(raw)
+    assert parsed["packs"] == sorted(parsed["packs"])
+
+
+def test_to_json_is_single_line() -> None:
+    """Single-line output is the contract — easy to grep, pipe, and
+    store. Multi-line would break naive downstream tooling."""
+    assert "\n" not in sound.to_json("packs")
+    assert "\n" not in sound.to_json("events")
+
+
+def test_to_json_unknown_kind_raises_value_error() -> None:
+    """Defensive: an unknown kind is a programming error, not a user
+    error. We raise so the bug surfaces immediately in tests."""
+    with pytest.raises(ValueError):
+        sound.to_json("unicorns")
+
+
+def test_parse_args_json_flag_default_false() -> None:
+    args = sound.parse_args([])
+    assert args.as_json is False
+
+
+def test_parse_args_json_flag_true() -> None:
+    args = sound.parse_args(["--json", "--list-packs"])
+    assert args.as_json is True
+    assert args.list_packs is True
+
+
+def test_main_list_packs_json_prints_json_object(
+    capsys, monkeypatch
+) -> None:
+    """``paw-sound --list-packs --json`` prints a single-line JSON
+    object and never touches the audio backend."""
+    import json as _json
+    played: list = []
+    monkeypatch.setattr(sound, "_play", lambda plan: played.append(plan) or 0)
+    code = sound.main(["--list-packs", "--json"])
+    assert code == 0
+    out = capsys.readouterr().out.strip()
+    parsed = _json.loads(out)
+    assert "packs" in parsed
+    assert set(parsed["packs"]) == set(sound.list_packs())
+    # Critical: nothing was played.
+    assert played == []
+
+
+def test_main_list_events_json_prints_json_object(
+    capsys, monkeypatch
+) -> None:
+    import json as _json
+    played: list = []
+    monkeypatch.setattr(sound, "_play", lambda plan: played.append(plan) or 0)
+    code = sound.main(["--list-events", "--json"])
+    assert code == 0
+    out = capsys.readouterr().out.strip()
+    parsed = _json.loads(out)
+    assert parsed["events"] == sound.list_events()
+    assert played == []
+
+
+def test_main_list_packs_text_mode_unchanged(capsys, monkeypatch) -> None:
+    """Regression: adding --json must not change the default text
+    output of --list-packs / --list-events (that's what shell
+    completion and humans rely on)."""
+    monkeypatch.setattr(sound, "_play", lambda plan: 0)
+    code = sound.main(["--list-packs"])
+    out = capsys.readouterr().out
+    assert code == 0
+    # Text mode: one name per line, no JSON braces.
+    assert "{" not in out
+    assert "}" not in out
+    lines = [ln for ln in out.splitlines() if ln]
+    assert set(lines) == set(sound.list_packs())
+
+
+def test_main_json_without_discovery_flag_exits_2(capsys) -> None:
+    """``--json`` alone (no --list-packs, no --list-events) is a usage
+    error — the user almost certainly forgot the discovery flag. We
+    exit 2 with a clear stderr message instead of silently printing
+    nothing or a confusing empty object."""
+    code = sound.main(["--json", "ok"])
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "--json" in err
+    assert "--list-packs" in err or "--list-events" in err
+
+
+def test_main_list_packs_json_does_not_print_banner(
+    capsys, monkeypatch
+) -> None:
+    """Even in JSON mode we must not print the 'playing' banner —
+    the output must be valid JSON, parseable by ``json.loads``."""
+    import json as _json
+    monkeypatch.setattr(sound, "_play", lambda plan: 0)
+    code = sound.main(["--list-packs", "--json"])
+    out = capsys.readouterr().out.strip()
+    assert code == 0
+    # If the banner were present, this would raise.
+    _json.loads(out)
+    assert "playing" not in out.lower()
+    assert "🐾" not in out

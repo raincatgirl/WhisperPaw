@@ -401,89 +401,70 @@
   stdin), a `--json` output mode for `paw-sound --list-packs`,
   or a fourth sound pack if the user asks for one.
 
-## 2026-09-15 — `paw-zoom` v0.1 (ASCII proof-of-concept) ships
+## 2026-09-15 — `paw-sound` grows `--json` output mode
 
-- Implemented `whisperpaw.zoom` end-to-end as a text-viewport
-  magnifier. The real screen-capture magnifier will plug in
-  *in front* of this same pipeline in a later tick — the math
-  and the CLI are the same whether the source is a text file
-  or a real screen-capture adapter.
-- Design shipped:
-  - `ZoomConfig` — frozen dataclass with `rows`, `cols`,
-    `zoom`, `fill`, `row_offset`, `col_offset`. The whole
-    "what to show" state in one immutable bundle.
-  - `_extract_region(source, rows, cols, row_offset, col_offset)`
-    — returns exactly `rows` lines of `cols` code points,
-    padding with `fill` when the source is short, clamping
-    offsets past either edge rather than raising. Unicode
-    is handled by code-point count.
-  - `_magnify(region, zoom, fill)` — repeats each cell
-    `zoom`×`zoom`, validates `1 ≤ zoom ≤ 32` (the upper bound
-    is a sanity guard so a stray huge value doesn't blow up
-    the terminal).
-  - `render_viewport(source, cfg)` — public entry point that
-    ties them together. Empty sources get a fully-padded
-    window so the user sees a visible (if blank) viewport
-    instead of a silent stream of spaces.
-  - Source resolution: positional text → `--file PATH` →
-    stdin, in that priority order. Strips a single trailing
-    newline from `--file` reads so the user gets a faithful
-    copy of the file's text. Uses the same
-    `WPAW_ZOOM_STDIN_OVERRIDE` env-var pattern that
-    `paw-read` and `paw-watch` use, so pytest's stdin
-    capture doesn't trip (the conftest now sets both
-    overrides on session start).
-- CLI flags shipped: `--file`, `--rows`, `--cols`, `--offset`,
-  `--col-offset`, `--zoom`, `--charset {space,hash,dot}`,
-  `--quiet`. Every flag is validated with a friendly message
-  and a stable exit code (1 = file missing, 2 = usage / no
-  source / invalid args).
-- Updated the existing
-  `test_shipped_static_file_matches_live_render` test by
-  regenerating the four shell-completion static files
-  (`whisperpaw.{bash,zsh,fish,nu}`) — `paw-zoom` now has a
-  real `build_parser()`, so its flags now show up in Tab
-  completion for all four shells. Renamed
-  `test_stub_tool_zoom_renders_a_minimal_entry` to
-  `test_paw_zoom_renders_a_real_entry` and updated it to
-  check for a known flag in the rendered output instead of
-  the "not implemented yet" stub note.
-- Added 38 new tests in `tests/test_zoom.py`:
-  - `ZoomConfig` defaults + frozen-ness
-  - source resolution (positional, `--file`, stdin,
-    missing-file, all-empty)
-  - region extraction (basic, offset, short source with
-    padding, no-trailing-newline, negative offset clamping,
-    past-end clamping, unicode)
-  - magnification (zoom 1, 2, 3, empty input, validation
-    of `zoom <= 0` and `zoom > MAX_ZOOM`)
-  - end-to-end `render_viewport` (default, empty source,
-    zoom-1 fidelity)
-  - argparse (every flag's help text, defaults, multi-word
-    positional join, rejection of `--rows 0`, `--cols 0`,
-    `--zoom 0`, `--zoom -3`, `--zoom 9999`, explicit
-    offset / col-offset)
-  - `main()` (positional text, `--file` input, stdin
-    input, `--quiet` suppresses banner, default banner
-    starts with `🐾 paw-zoom:`, missing `--file` exits 1,
-    no-source exits 2 with a clear stderr message)
-- Total: **198/198 tests green** (38 new + 160 existing).
-- Behaviour: pure stdlib, no telemetry, no network. The
-  magnification primitive is O(rows × cols × zoom²), which
-  is trivial even at the maximum 32× zoom factor on a
-  10×40 viewport (~3.2 ms on the test machine).
-- Next tick: the natural follow-up is the real screen-
-  capture render — an OS-specific adapter that produces a
-  text grid (or, eventually, a half-block pixel grid) in
-  the same shape `render_viewport` already accepts, plus
-  a render loop and a hotkey to toggle the magnifier on
-  and off. Linux/macOS first (the capture layer is
-  `mss` or stdlib `ctypes` for X11, plus a small TUI loop
-  with `curses`), Windows is harder (PowerShell /
-  `SetWindowsHookEx` for hotkeys) and may be a separate
-  tick. Other reasonable one-tick directions: a small
-  bug-fix pass (e.g. the misleading "we route through a
-  temp file" comment in `paw-read`'s macOS / Windows Piper
-  playback path — the code actually pipes via stdin), a
-  `--json` output mode for `paw-sound --list-packs`, or a
-  fourth sound pack if the user asks for one.
+- Added a new `--json` flag to `paw-sound`. It is a **modifier** on
+  the existing `--list-packs` / `--list-events` discovery flags: it
+  swaps the default one-name-per-line text output for a single-line
+  JSON object. Example:
+  - `paw-sound --list-packs --json` → `{"packs": ["cat", "forest", "rain"]}`
+  - `paw-sound --list-events --json` → `{"events": ["ok", "warn", "fail", "ready", "ding"]}`
+- The output is compact (no indent), `sort_keys=True`,
+  `ensure_ascii=False` so non-ASCII pack / event names pass through
+  verbatim. The `packs` array is sorted alphabetically (same as
+  `list_packs()`); the `events` array is in the canonical
+  `("ok", "warn", "fail", "ready", "ding")` order (same as
+  `list_events()`).
+- `--json` without either discovery flag is a usage error — the
+  user almost certainly forgot the flag, so we print
+  `paw-sound: --json requires --list-packs or --list-events` to
+  stderr and exit 2. We never emit an empty `{}` or a confusing
+  partial object; the user gets a clear pointer to the fix.
+- The text output is **unchanged** — shell completion, `grep`, and
+  humans reading the terminal all still see one name per line. The
+  text path is regression-tested (`test_main_list_packs_text_mode_unchanged`).
+- Exposed the same serialisation as a plain function,
+  `whisperpaw.sound.to_json("packs" | "events")`, so other modules
+  (and tests) can re-use the exact shape the CLI prints. Unknown
+  kinds raise `ValueError` — a programming error, not a user error.
+- Regenerated the four shipped static completion files
+  (`whisperpaw.{bash,zsh,fish,nu}`) — the existing
+  `test_shipped_static_file_matches_live_render` test caught them
+  being out of sync and forced a regen. The new flag now shows up
+  in Tab completion for all four shells.
+- Added 12 new tests in `tests/test_sound.py`:
+  - `to_json("packs")` / `to_json("events")` round-trip through
+    `json.loads` and produce the expected object
+  - `to_json` packs array is sorted
+  - `to_json` is single-line (no `\n`)
+  - `to_json` unknown kind raises `ValueError`
+  - `--json` parses as a boolean with `dest="as_json"` (default
+    false; combinable with `--list-packs`)
+  - `main(["--list-packs", "--json"])` prints a parseable JSON
+    object and never calls `_play`
+  - `main(["--list-events", "--json"])` prints a parseable JSON
+    object and never calls `_play`
+  - **regression**: `main(["--list-packs"])` text output is
+    unchanged (no `{` or `}` in the output)
+  - `main(["--json", "ok"])` (no discovery flag) exits 2 with a
+    clear stderr message naming both required flags
+  - JSON mode does not print the "playing" banner — the output is
+    still valid JSON
+- Total: **210/210 tests green** (12 new + 198 existing).
+- Behaviour: pure stdlib, no telemetry, no network. The flag is
+  free at runtime — `json.dumps` on a list of 3 strings takes
+  microseconds. The audio backend is **never** touched in discovery
+  mode, so `--json` is safe to use on a system with no audio
+  device.
+- Next tick: `paw-zoom` is the only planned tool left. The natural
+  follow-up to v0.1 is the real screen-capture render — an
+  OS-specific adapter that produces a text grid in the same shape
+  `render_viewport()` already accepts, plus a render loop and a
+  hotkey to toggle the magnifier on and off. Linux/macOS first
+  (`mss` or stdlib `ctypes` for X11, plus a small TUI loop with
+  `curses`), Windows is harder (`SetWindowsHookEx` for hotkeys) and
+  may be a separate tick. Other reasonable one-tick directions:
+  the misleading "we route through a temp file" comment in
+  `paw-read`'s macOS / Windows Piper playback path (the code
+  actually pipes via stdin), a small bug-fix pass on existing
+  tests, or a fourth sound pack if the user asks for one.

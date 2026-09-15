@@ -58,6 +58,7 @@ paw-sound --pack rain ding
 # Discover what's available without playing anything
 paw-sound --list-packs     # cat / forest / rain
 paw-sound --list-events    # ok / warn / fail / ready / ding
+paw-sound --list-packs --json   # → {"packs": ["cat", "forest", "rain"]} (for jq / scripts)
 
 # Tail a long build and hear each new line as it appears
 paw-watch --max-lines 20 -- make
@@ -105,7 +106,9 @@ paw-zoom --rows 10 --cols 40 --charset dot "short"
 - [x] `paw-watch` — tail-and-read (reuses paw-read)
 - [x] Shell completions (bash / zsh / fish / nushell) — `paw-complete`
 - [x] `paw-zoom` — v0.1 ASCII proof-of-concept (data model + viewport math + magnification)
-- [ ] Sound pack: `rain` / `keyboard` (only if forest feels good)
+- [x] `paw-sound` discovery flags (`--list-packs` / `--list-events`) + `--json` output
+- [ ] `paw-zoom` v0.2 — real screen-capture render (Linux/macOS first)
+- [ ] `paw-zoom` v0.3 — Windows render + global hotkey
 - [ ] Homebrew formula + pip release
 
 See [`ROADMAP.md`](./ROADMAP.md) for the full plan and per-tick progress.

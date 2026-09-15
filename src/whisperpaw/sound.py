@@ -18,6 +18,7 @@ Design notes
 from __future__ import annotations
 
 import argparse
+import json
 import platform
 import shutil
 import subprocess
@@ -61,6 +62,30 @@ def list_events() -> list[str]:
     (and tests) can ask what's available without parsing the parser.
     """
     return list(KNOWN_EVENTS)
+
+
+def to_json(kind: str) -> str:
+    """Return the requested discovery data as a JSON string.
+
+    ``kind`` is either ``"packs"`` or ``"events"``. The output is a
+    compact, single-line JSON object with one key, so it can be
+    diffed, piped to ``jq``, or stored as a build artefact without
+    further parsing.
+
+    Raises :class:`ValueError` for unknown ``kind`` values.
+    """
+    if kind == "packs":
+        payload = {"packs": list_packs()}
+    elif kind == "events":
+        payload = {"events": list_events()}
+    else:
+        raise ValueError(
+            f"unknown kind {kind!r}; expected 'packs' or 'events'"
+        )
+    # ``sort_keys`` keeps the output stable across runs and platforms;
+    # ``ensure_ascii=False`` preserves non-ASCII pack / event names
+    # verbatim. No indent — the output is meant to be piped to ``jq``.
+    return json.dumps(payload, sort_keys=True, ensure_ascii=False)
 
 #: File extensions we know how to feed to a system player.
 _AUDIO_EXTS: tuple[str, ...] = (".wav", ".mp3", ".ogg", ".flac")
@@ -137,6 +162,17 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Print the names of every known event, one per line, and exit. "
             "Nothing is played. Useful for discovery and for shell completion."
+        ),
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help=(
+            "Combine with --list-packs or --list-events to emit a JSON "
+            "object instead of one-name-per-line text. The object has one "
+            "key ('packs' or 'events') whose value is the list. Nothing is "
+            "played. Useful for jq / scripts / build artefacts."
         ),
     )
     return parser
@@ -292,13 +328,25 @@ def main(argv: list[str] | None = None) -> int:
     # Discovery flags short-circuit before any audio resolution — they
     # are mutually exclusive with playing a sound, and they don't need
     # to touch the audio device.
+    if args.as_json and not (args.list_packs or args.list_events):
+        print(
+            "paw-sound: --json requires --list-packs or --list-events",
+            file=sys.stderr,
+        )
+        return 2
     if args.list_packs:
-        for name in list_packs():
-            print(name)
+        if args.as_json:
+            print(to_json("packs"))
+        else:
+            for name in list_packs():
+                print(name)
         return 0
     if args.list_events:
-        for name in list_events():
-            print(name)
+        if args.as_json:
+            print(to_json("events"))
+        else:
+            for name in list_events():
+                print(name)
         return 0
 
     try:

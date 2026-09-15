@@ -44,12 +44,23 @@ Legend: 🐣 planned · 🛠 in progress · ✅ shipped · 🐛 buggy
   touching the audio device. They are mutually exclusive with
   playing a sound and exist primarily to feed shell completions
   and to make the tool discoverable.
+- JSON output: ``--json`` combines with either discovery flag to
+  emit a single-line JSON object instead of the default text.
+  ``paw-sound --list-packs --json`` → ``{"packs": ["cat", ...]}``;
+  ``paw-sound --list-events --json`` → ``{"events": ["ok", ...]}``.
+  The output is sorted, single-line, ``ensure_ascii=False``, and
+  parseable by ``json.loads`` / ``jq`` without further work. Using
+  ``--json`` without a discovery flag is a usage error (exit 2 with
+  a clear stderr message) — we never emit an empty or ambiguous
+  object.
 - Public discovery helpers: :func:`whisperpaw.sound.list_packs` and
   :func:`whisperpaw.sound.list_events` — the same data the CLI prints,
   exposed as plain functions so ``paw-complete`` and tests don't have
-  to reach into the parser.
+  to reach into the parser. The JSON shape is exposed as
+  :func:`whisperpaw.sound.to_json("packs" | "events")` so callers can
+  re-use the exact same serialisation the CLI uses.
 - CLI: ``paw-sound [event] [--pack PACK] [--volume 0..1] [--quiet]
-  [--list-packs] [--list-events]``.
+  [--list-packs] [--list-events] [--json]``.
 
 ### `paw-read` design
 
@@ -177,4 +188,5 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-14 — paw-sound: added 'rain' pack (rhythmic drops + thunder crack), 10 new tests, 151/151 green.
 - 2026-09-15 — paw-sound: added --list-packs / --list-events discovery flags + public list_packs() / list_events() helpers; regenerated the four shell-completion static files. 9 new tests, 160/160 green.
 - 2026-09-15 — paw-zoom: ASCII proof-of-concept (data model + viewport math + magnification + source resolver + argparse). 38 new tests, 198/198 green. v0.1 shipped; real screen-capture render lands in a later tick.
+- 2026-09-15 — paw-sound: added --json output mode for the discovery flags + public to_json() helper. 12 new tests, 210/210 green.
 <!-- TICK-LOG-END -->
