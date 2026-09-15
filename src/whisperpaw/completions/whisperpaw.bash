@@ -54,6 +54,17 @@ _paw_complete_paw_watch() {
 }
 complete -F _paw_complete_paw_watch paw-watch
 
-# paw-zoom: no completion data yet (build_parser() missing).
-_paw_zoom() { :; }
-complete -F _paw_zoom paw-zoom 2>/dev/null || true
+_paw_zoom_flags() {
+  COMPREPLY=(--file --rows --cols --offset --col-offset --zoom --charset --quiet)
+}
+_paw_complete_paw_zoom() {
+  local cur prev
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  if [[ "$cur" == --* ]]; then
+    COMPREPLY=($(compgen -W '--file --rows --cols --offset --col-offset --zoom --charset --quiet' -- "$cur"))
+    return 0
+  fi
+  # No subcommands; nothing else to complete.
+  return 0
+}
+complete -F _paw_complete_paw_zoom paw-zoom

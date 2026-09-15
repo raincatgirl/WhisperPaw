@@ -34,5 +34,12 @@ complete -c paw-watch -l include-stderr -d 'Also speak lines that arrive on stde
 complete -c paw-watch -l quiet -d 'Suppress the announcement line (still speaks).'
 complete -c paw-watch -l follow -d 'Stream the output instead of waiting for the command to finish: each new line i…'
 
-# paw-zoom: no completion data yet (build_parser() missing).
-complete -c paw-zoom -f
+# Auto-generated completions for paw-zoom.
+complete -c paw-zoom -l file -d 'Read text from this UTF-8 file instead of positional args.'
+complete -c paw-zoom -l rows -d 'How many source rows to show (default: 10, must be >= 1).'
+complete -c paw-zoom -l cols -d 'How many source columns to show (default: 40, must be >= 1).'
+complete -c paw-zoom -l offset -d 'Starting row in the source (default: 0).'
+complete -c paw-zoom -l col-offset -d 'Starting column in the source (default: 0).'
+complete -c paw-zoom -l zoom -d 'Magnification factor: each source cell becomes a --zoom×--zoom block (default:…'
+complete -c paw-zoom -l charset -d 'Fill character for empty cells: \'space\' (default, invisible), \'hash\' (#), or \'d…'
+complete -c paw-zoom -l quiet -d 'Suppress the announcement line (still renders).'

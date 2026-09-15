@@ -43,6 +43,15 @@ extern "paw-watch" [
     --follow: string  # Stream the output instead of waiting for the command to finish: each new line i…
 ]
 
-# paw-zoom: no completion data yet (build_parser() missing).
-extern "paw-zoom" []
-
+# Auto-generated external completer for paw-zoom.
+# Add this file's contents to your config.nu, or `source` it from there.
+extern "paw-zoom" [
+    --file: string  # Read text from this UTF-8 file instead of positional args.
+    --rows: string  # How many source rows to show (default: 10, must be >= 1).
+    --cols: string  # How many source columns to show (default: 40, must be >= 1).
+    --offset: string  # Starting row in the source (default: 0).
+    --col-offset: string  # Starting column in the source (default: 0).
+    --zoom: string  # Magnification factor: each source cell becomes a --zoom×--zoom block (default:…
+    --charset: string  # Fill character for empty cells: 'space' (default, invisible), 'hash' (#), or 'd…
+    --quiet: string  # Suppress the announcement line (still renders).
+]

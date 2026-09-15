@@ -50,6 +50,16 @@ _paw_watch() {
 _paw_watch "$@"
 
 #compdef paw-zoom
-# paw-zoom: no completion data yet (build_parser() missing).
-_paw_zoom() { _files }
+# Auto-generated for paw-zoom from its argparse parser.
+_paw_zoom() {
+  _arguments -s \
+    '--file[Read text from this UTF-8 file instead of positional args.]' \
+    '--rows[How many source rows to show (default: 10, must be >= 1).]' \
+    '--cols[How many source columns to show (default: 40, must be >= 1).]' \
+    '--offset[Starting row in the source (default: 0).]' \
+    '--col-offset[Starting column in the source (default: 0).]' \
+    '--zoom[Magnification factor: each source cell becomes a --zoom×--zoom block (default:…]' \
+    '--charset[Fill character for empty cells: ''space'' (default, invisible), ''hash'' (#), or ''d…]' \
+    '--quiet[Suppress the announcement line (still renders).]'
+}
 _paw_zoom "$@"

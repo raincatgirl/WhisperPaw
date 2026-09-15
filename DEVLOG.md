@@ -400,3 +400,90 @@
   Windows Piper playback path — the code actually pipes via
   stdin), a `--json` output mode for `paw-sound --list-packs`,
   or a fourth sound pack if the user asks for one.
+
+## 2026-09-15 — `paw-zoom` v0.1 (ASCII proof-of-concept) ships
+
+- Implemented `whisperpaw.zoom` end-to-end as a text-viewport
+  magnifier. The real screen-capture magnifier will plug in
+  *in front* of this same pipeline in a later tick — the math
+  and the CLI are the same whether the source is a text file
+  or a real screen-capture adapter.
+- Design shipped:
+  - `ZoomConfig` — frozen dataclass with `rows`, `cols`,
+    `zoom`, `fill`, `row_offset`, `col_offset`. The whole
+    "what to show" state in one immutable bundle.
+  - `_extract_region(source, rows, cols, row_offset, col_offset)`
+    — returns exactly `rows` lines of `cols` code points,
+    padding with `fill` when the source is short, clamping
+    offsets past either edge rather than raising. Unicode
+    is handled by code-point count.
+  - `_magnify(region, zoom, fill)` — repeats each cell
+    `zoom`×`zoom`, validates `1 ≤ zoom ≤ 32` (the upper bound
+    is a sanity guard so a stray huge value doesn't blow up
+    the terminal).
+  - `render_viewport(source, cfg)` — public entry point that
+    ties them together. Empty sources get a fully-padded
+    window so the user sees a visible (if blank) viewport
+    instead of a silent stream of spaces.
+  - Source resolution: positional text → `--file PATH` →
+    stdin, in that priority order. Strips a single trailing
+    newline from `--file` reads so the user gets a faithful
+    copy of the file's text. Uses the same
+    `WPAW_ZOOM_STDIN_OVERRIDE` env-var pattern that
+    `paw-read` and `paw-watch` use, so pytest's stdin
+    capture doesn't trip (the conftest now sets both
+    overrides on session start).
+- CLI flags shipped: `--file`, `--rows`, `--cols`, `--offset`,
+  `--col-offset`, `--zoom`, `--charset {space,hash,dot}`,
+  `--quiet`. Every flag is validated with a friendly message
+  and a stable exit code (1 = file missing, 2 = usage / no
+  source / invalid args).
+- Updated the existing
+  `test_shipped_static_file_matches_live_render` test by
+  regenerating the four shell-completion static files
+  (`whisperpaw.{bash,zsh,fish,nu}`) — `paw-zoom` now has a
+  real `build_parser()`, so its flags now show up in Tab
+  completion for all four shells. Renamed
+  `test_stub_tool_zoom_renders_a_minimal_entry` to
+  `test_paw_zoom_renders_a_real_entry` and updated it to
+  check for a known flag in the rendered output instead of
+  the "not implemented yet" stub note.
+- Added 38 new tests in `tests/test_zoom.py`:
+  - `ZoomConfig` defaults + frozen-ness
+  - source resolution (positional, `--file`, stdin,
+    missing-file, all-empty)
+  - region extraction (basic, offset, short source with
+    padding, no-trailing-newline, negative offset clamping,
+    past-end clamping, unicode)
+  - magnification (zoom 1, 2, 3, empty input, validation
+    of `zoom <= 0` and `zoom > MAX_ZOOM`)
+  - end-to-end `render_viewport` (default, empty source,
+    zoom-1 fidelity)
+  - argparse (every flag's help text, defaults, multi-word
+    positional join, rejection of `--rows 0`, `--cols 0`,
+    `--zoom 0`, `--zoom -3`, `--zoom 9999`, explicit
+    offset / col-offset)
+  - `main()` (positional text, `--file` input, stdin
+    input, `--quiet` suppresses banner, default banner
+    starts with `🐾 paw-zoom:`, missing `--file` exits 1,
+    no-source exits 2 with a clear stderr message)
+- Total: **198/198 tests green** (38 new + 160 existing).
+- Behaviour: pure stdlib, no telemetry, no network. The
+  magnification primitive is O(rows × cols × zoom²), which
+  is trivial even at the maximum 32× zoom factor on a
+  10×40 viewport (~3.2 ms on the test machine).
+- Next tick: the natural follow-up is the real screen-
+  capture render — an OS-specific adapter that produces a
+  text grid (or, eventually, a half-block pixel grid) in
+  the same shape `render_viewport` already accepts, plus
+  a render loop and a hotkey to toggle the magnifier on
+  and off. Linux/macOS first (the capture layer is
+  `mss` or stdlib `ctypes` for X11, plus a small TUI loop
+  with `curses`), Windows is harder (PowerShell /
+  `SetWindowsHookEx` for hotkeys) and may be a separate
+  tick. Other reasonable one-tick directions: a small
+  bug-fix pass (e.g. the misleading "we route through a
+  temp file" comment in `paw-read`'s macOS / Windows Piper
+  playback path — the code actually pipes via stdin), a
+  `--json` output mode for `paw-sound --list-packs`, or a
+  fourth sound pack if the user asks for one.

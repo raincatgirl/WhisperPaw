@@ -1,0 +1,354 @@
+"""Tests for ``paw-zoom`` (text-viewport magnifier, ASCII POC)."""
+from __future__ import annotations
+
+import io
+import os
+from contextlib import redirect_stdout, redirect_stderr
+
+import pytest
+
+from whisperpaw import zoom
+
+
+# ---------------------------------------------------------------------------
+# ZoomConfig dataclass
+# ---------------------------------------------------------------------------
+
+
+def test_zoom_config_defaults() -> None:
+    """A default ZoomConfig is a sensible starting point."""
+    cfg = zoom.ZoomConfig()
+    assert cfg.rows == 10
+    assert cfg.cols == 40
+    assert cfg.zoom == 2
+    assert cfg.fill == " "
+    assert cfg.row_offset == 0
+    assert cfg.col_offset == 0
+
+
+def test_zoom_config_frozen() -> None:
+    """ZoomConfig is immutable — accidental mutation shouldn't happen."""
+    cfg = zoom.ZoomConfig()
+    with pytest.raises((AttributeError, Exception)):
+        cfg.rows = 999  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Source resolution
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_source_positional() -> None:
+    """A positional string is the highest-priority source."""
+    text = zoom._resolve_source(
+        text="from positional", file=None, stdin_text="from stdin"
+    )
+    assert text == "from positional"
+
+
+def test_resolve_source_file(tmp_path) -> None:
+    """``--file`` is used when no positional text is given."""
+    p = tmp_path / "notes.txt"
+    p.write_text("hello from file\n", encoding="utf-8")
+    text = zoom._resolve_source(
+        text=None, file=str(p), stdin_text="from stdin"
+    )
+    assert text == "hello from file"
+
+
+def test_resolve_source_stdin() -> None:
+    """Without positional or --file, the stdin value is used."""
+    text = zoom._resolve_source(text=None, file=None, stdin_text="from stdin")
+    assert text == "from stdin"
+
+
+def test_resolve_source_file_missing(tmp_path) -> None:
+    """A missing --file path raises FileNotFoundError."""
+    p = tmp_path / "nope.txt"
+    with pytest.raises(FileNotFoundError):
+        zoom._resolve_source(text=None, file=str(p), stdin_text=None)
+
+
+def test_resolve_source_all_empty(monkeypatch) -> None:
+    """When every source is empty / missing, a RuntimeError is raised."""
+    monkeypatch.setenv("WPAW_ZOOM_STDIN_OVERRIDE", "")
+    with pytest.raises(RuntimeError):
+        zoom._resolve_source(text=None, file=None, stdin_text=None)
+
+
+# ---------------------------------------------------------------------------
+# Region extraction
+# ---------------------------------------------------------------------------
+
+
+def test_extract_region_basic() -> None:
+    """A rectangular sub-grid is returned as a list of strings."""
+    src = "abcdef\n" "ghijkl\n" "mnopqr\n"
+    region = zoom._extract_region(src, rows=2, cols=3, row_offset=0, col_offset=0)
+    assert region == ["abc", "ghi"]
+
+
+def test_extract_region_offset() -> None:
+    """row_offset and col_offset shift the window."""
+    src = "abcdef\n" "ghijkl\n" "mnopqr\n"
+    # col_offset=2, cols=3 -> chars at index 2,3,4 -> 'cde', 'ijk', 'opq'
+    region = zoom._extract_region(src, rows=2, cols=3, row_offset=1, col_offset=2)
+    assert region == ["ijk", "opq"]
+
+
+def test_extract_region_short_source() -> None:
+    """A source smaller than the window is padded with spaces (right / bottom)."""
+    src = "ab\n" "cd"
+    region = zoom._extract_region(src, rows=3, cols=4, row_offset=0, col_offset=0)
+    assert region == ["ab  ", "cd  ", "    "]
+
+
+def test_extract_region_no_trailing_newline() -> None:
+    """Sources without a trailing newline are treated as a full last line."""
+    src = "abcdef\nghijkl"  # no \n after last line
+    region = zoom._extract_region(src, rows=2, cols=6, row_offset=0, col_offset=0)
+    assert region == ["abcdef", "ghijkl"]
+
+
+def test_extract_region_clamps_negative_offsets() -> None:
+    """Negative offsets are clamped to zero (we don't wrap or error)."""
+    src = "ab\ncd"
+    region = zoom._extract_region(src, rows=1, cols=2, row_offset=-5, col_offset=-3)
+    assert region == ["ab"]
+
+
+def test_extract_region_clamps_past_end() -> None:
+    """Offsets past the source end return empty/padded lines."""
+    src = "ab\ncd"
+    region = zoom._extract_region(src, rows=2, cols=2, row_offset=10, col_offset=10)
+    assert region == ["  ", "  "]
+
+
+def test_extract_region_unicode() -> None:
+    """Unicode is handled by code-point count, not bytes."""
+    src = "你好世界\n再见朋友"
+    region = zoom._extract_region(src, rows=2, cols=4, row_offset=0, col_offset=0)
+    # Each cell is one code point; width 4 means the first 4 codepoints.
+    assert region == ["你好世界", "再见朋友"]
+
+
+# ---------------------------------------------------------------------------
+# Magnification
+# ---------------------------------------------------------------------------
+
+
+def test_magnify_zoom_1() -> None:
+    """zoom=1 is a no-op (each cell becomes a 1x1 block of itself)."""
+    region = ["ab", "cd"]
+    out = zoom._magnify(region, zoom=1, fill=" ")
+    assert out == "ab\ncd"
+
+
+def test_magnify_zoom_2() -> None:
+    """zoom=2 doubles each character in both directions."""
+    region = ["ab", "cd"]
+    out = zoom._magnify(region, zoom=2, fill=" ")
+    assert out == "aabb\n" "aabb\n" "ccdd\n" "ccdd"
+
+
+def test_magnify_zoom_3() -> None:
+    """zoom=3 triples each character in both directions."""
+    region = ["x"]
+    out = zoom._magnify(region, zoom=3, fill=" ")
+    assert out == "xxx\n" "xxx\n" "xxx"
+
+
+def test_magnify_zoom_with_fill() -> None:
+    """The ``fill`` char replaces every cell, then the same fill is repeated."""
+    region = []
+    out = zoom._magnify(region, zoom=2, fill="#")
+    # empty region, zero lines, empty output
+    assert out == ""
+
+
+def test_magnify_zoom_validates() -> None:
+    """zoom must be a positive integer."""
+    with pytest.raises(ValueError):
+        zoom._magnify(["a"], zoom=0, fill=" ")
+    with pytest.raises(ValueError):
+        zoom._magnify(["a"], zoom=-1, fill=" ")
+
+
+# ---------------------------------------------------------------------------
+# End-to-end render
+# ---------------------------------------------------------------------------
+
+
+def test_render_viewport_default() -> None:
+    """End-to-end: a small source renders to a 2x magnified default window."""
+    src = "abcdefghij\n" "klmnopqrst"
+    out = zoom.render_viewport(
+        source=src,
+        cfg=zoom.ZoomConfig(rows=2, cols=5, zoom=2),
+    )
+    # 2 source rows, 2 zoomed rows each = 4 output lines.
+    assert out == "aabbccddee\n" "aabbccddee\n" "kkllmmnnoo\n" "kkllmmnnoo"
+
+
+def test_render_viewport_empty_source() -> None:
+    """An empty source renders to a fully padded window of the requested size."""
+    out = zoom.render_viewport(
+        source="",
+        cfg=zoom.ZoomConfig(rows=3, cols=4, zoom=2, fill="."),
+    )
+    # 3 source rows, 4 source cols, zoom=2 -> 6 output lines, each 8 dots,
+    # joined by 5 '\\n' characters between the 6 lines (no trailing \\n).
+    assert out == "........\n" * 5 + "........"
+    assert out.count("\n") == 5
+    # Total length = 6 lines × 8 chars + 5 newlines = 53.
+    assert len(out) == 8 * 6 + 5
+
+
+def test_render_viewport_zoom_1_matches_input() -> None:
+    """At zoom=1, the output is a faithful view of the requested region."""
+    src = "abcdef\n" "ghijkl"
+    out = zoom.render_viewport(
+        source=src,
+        cfg=zoom.ZoomConfig(rows=2, cols=6, zoom=1, row_offset=0, col_offset=0),
+    )
+    assert out == "abcdef\nghijkl"
+
+
+# ---------------------------------------------------------------------------
+# Argparse
+# ---------------------------------------------------------------------------
+
+
+def test_build_parser_help_includes_key_flags() -> None:
+    """The --help output mentions every key flag."""
+    parser = zoom.build_parser()
+    help_text = parser.format_help()
+    for flag in ("--rows", "--cols", "--offset", "--zoom", "--charset", "--file"):
+        assert flag in help_text, f"--help missing {flag}"
+
+
+def test_parse_args_defaults() -> None:
+    """Sensible defaults: text=None, file=None, rows=10, cols=40, zoom=2."""
+    args = zoom.parse_args([])
+    assert args.text is None
+    assert args.file is None
+    assert args.rows == 10
+    assert args.cols == 40
+    assert args.zoom == 2
+    assert args.offset == 0
+    assert args.col_offset == 0
+    assert args.charset == "space"
+    assert args.quiet is False
+
+
+def test_parse_args_text_joined() -> None:
+    """A multi-word positional is joined with single spaces."""
+    args = zoom.parse_args(["hello", "world"])
+    assert args.text == "hello world"
+
+
+def test_parse_args_rejects_zero_rows() -> None:
+    """--rows must be >= 1."""
+    with pytest.raises(SystemExit):
+        zoom.parse_args(["--rows", "0", "x"])
+
+
+def test_parse_args_rejects_zero_cols() -> None:
+    """--cols must be >= 1."""
+    with pytest.raises(SystemExit):
+        zoom.parse_args(["--cols", "0", "x"])
+
+
+def test_parse_args_rejects_zero_zoom() -> None:
+    """--zoom must be >= 1."""
+    with pytest.raises(SystemExit):
+        zoom.parse_args(["--zoom", "0", "x"])
+
+
+def test_parse_args_rejects_negative_zoom() -> None:
+    """--zoom must be > 0."""
+    with pytest.raises(SystemExit):
+        zoom.parse_args(["--zoom", "-3", "x"])
+
+
+def test_parse_args_rejects_oversized_zoom() -> None:
+    """--zoom is bounded so a stray huge value doesn't blow up the terminal."""
+    with pytest.raises(SystemExit):
+        zoom.parse_args(["--zoom", "9999", "x"])
+
+
+def test_parse_args_offsets_default_to_zero() -> None:
+    """Offsets default to 0; explicit values are accepted."""
+    args = zoom.parse_args(["--offset", "5", "--col-offset", "3", "x"])
+    assert args.offset == 5
+    assert args.col_offset == 3
+
+
+# ---------------------------------------------------------------------------
+# main() — CLI entry point
+# ---------------------------------------------------------------------------
+
+
+def test_main_positional_text(capsys) -> None:
+    """main() prints the magnified viewport and exits 0."""
+    rc = zoom.main(["hello"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # "hello" -> 5 cols, rows=10, so the first 10 chars of the padded window
+    # are 'hello' (5 wide) then 5 spaces; zoom=2 -> each becomes 2x2.
+    assert "hheelllloo" in out
+
+
+def test_main_file_input(tmp_path, capsys) -> None:
+    """main() reads --file when no positional is given."""
+    p = tmp_path / "in.txt"
+    p.write_text("ab", encoding="utf-8")
+    rc = zoom.main(["--rows", "1", "--cols", "2", "--zoom", "1", "--file", str(p), "--quiet"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # print() adds a trailing newline; the magnified viewport for "ab" at
+    # zoom=1 is just "ab".
+    assert out == "ab\n"
+
+
+def test_main_stdin_input(monkeypatch, capsys) -> None:
+    """When no positional and no --file, stdin is used (via the override)."""
+    monkeypatch.setenv("WPAW_ZOOM_STDIN_OVERRIDE", "ab")
+    rc = zoom.main(["--rows", "1", "--cols", "2", "--zoom", "1", "--quiet"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out == "ab\n"
+
+
+def test_main_quiet_suppresses_banner(capsys) -> None:
+    """--quiet removes the announcement line."""
+    zoom.main(["--quiet", "x"])
+    out = capsys.readouterr().out
+    # No paw-zoom announcement should be present.
+    assert "paw-zoom" not in out
+
+
+def test_main_announces_by_default(capsys) -> None:
+    """Without --quiet, a short announcement line is printed first."""
+    zoom.main(["--rows", "1", "--cols", "1", "z"])
+    out = capsys.readouterr().out
+    # Announcement goes to stdout and is the first line.
+    first_line = out.splitlines()[0]
+    assert first_line.startswith("🐾 paw-zoom:")
+
+
+def test_main_file_not_found(capsys) -> None:
+    """A missing --file exits 1 and prints to stderr."""
+    rc = zoom.main(["--file", "/nope/does/not/exist.txt", "--quiet"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "not found" in err.lower() or "no such file" in err.lower()
+
+
+def test_main_no_source(capsys, monkeypatch) -> None:
+    """No positional, no --file, empty stdin -> exit 2 with a clear message."""
+    monkeypatch.setenv("WPAW_ZOOM_STDIN_OVERRIDE", "")
+    rc = zoom.main(["--quiet"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "no text" in err.lower() or "no source" in err.lower()

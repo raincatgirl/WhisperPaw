@@ -27,7 +27,7 @@ This document is the **single source of truth** for what WhisperPaw will be and 
 | `paw-read`  | ✅ shipped | Read text aloud (stdin / file / clipboard). |
 | `paw-watch` | ✅ shipped | Tail a command and speak new lines. |
 | `paw-complete` | ✅ shipped | Print shell completions (bash / zsh / fish / nushell) for every shipped tool, derived live from each tool's argparse parser. |
-| `paw-zoom`  | 🐣 planned | Magnify area around the cursor. |
+| `paw-zoom`  | ✅ shipped (v0.1) | Magnify a rectangular region of text (ASCII proof-of-concept). Real screen-capture render lands in a later tick. |
 
 Legend: 🐣 planned · 🛠 in progress · ✅ shipped · 🐛 buggy
 
@@ -120,7 +120,43 @@ Legend: 🐣 planned · 🛠 in progress · ✅ shipped · 🐛 buggy
 
 ### `paw-zoom` design
 
-_(TBD — still a stub.)_
+v0.1 (this tick) is the **ASCII proof-of-concept**. It accepts a text
+source (positional → ``--file PATH`` → stdin), extracts a rectangular
+sub-grid at ``(--row-offset, --col-offset)``, and renders that grid
+"magnified" — each source cell becomes a ``--zoom``×``--zoom`` block.
+The output is the magnified viewport printed to stdout.
+
+The point of the POC is to nail down the parts that don't depend on
+the capture layer before any per-OS screen-capture adapter lands:
+
+- the data model: :class:`whisperpaw.zoom.ZoomConfig`
+  (frozen dataclass: ``rows``, ``cols``, ``zoom``, ``fill``,
+  ``row_offset``, ``col_offset``)
+- the viewport math: :func:`whisperpaw.zoom._extract_region` returns
+  exactly ``rows`` lines of ``cols`` code points, padding with
+  ``fill`` when the source is short, clamping offsets past either edge
+  rather than raising
+- the magnification primitive: :func:`whisperpaw.zoom._magnify` repeats
+  each cell ``--zoom`` times in both directions and validates that
+  ``1 ≤ zoom ≤ 32`` (the upper bound is a sanity guard so a stray huge
+  value doesn't blow up the terminal)
+- the source resolver (positional → ``--file`` → stdin, with the same
+  ``WPAW_ZOOM_STDIN_OVERRIDE`` env-var pattern that ``paw-read`` and
+  ``paw-watch`` use, so pytest's stdin capture doesn't trip)
+- a real argparse layer (so ``paw-complete`` and Tab completion see
+  ``paw-zoom``'s flags too)
+
+Pure stdlib, no third-party runtime deps. No real screen capture yet
+— the next tick will add an OS-specific adapter that produces a
+text grid in the same shape that ``render_viewport`` already accepts,
+so the math and the CLI don't need to change.
+
+CLI: ``paw-zoom [TEXT] [--file PATH] [--rows N] [--cols N]
+[--offset N] [--col-offset N] [--zoom 1..32]
+[--charset space|hash|dot] [--quiet]``.
+
+Exit codes: 0 ok, 1 ``--file`` not found, 2 usage / no source /
+invalid args.
 
 ---
 
@@ -140,4 +176,5 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-14 — paw-complete: shell completions (bash / zsh / fish / nushell) generated live from each tool's argparse parser. 27 new tests, 141/141 green. Shipped.
 - 2026-09-14 — paw-sound: added 'rain' pack (rhythmic drops + thunder crack), 10 new tests, 151/151 green.
 - 2026-09-15 — paw-sound: added --list-packs / --list-events discovery flags + public list_packs() / list_events() helpers; regenerated the four shell-completion static files. 9 new tests, 160/160 green.
+- 2026-09-15 — paw-zoom: ASCII proof-of-concept (data model + viewport math + magnification + source resolver + argparse). 38 new tests, 198/198 green. v0.1 shipped; real screen-capture render lands in a later tick.
 <!-- TICK-LOG-END -->

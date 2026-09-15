@@ -129,16 +129,18 @@ def test_nu_output_is_external_completer_style() -> None:
     assert 'extern "paw-zoom"' in text
 
 
-def test_stub_tool_zoom_renders_a_minimal_entry() -> None:
-    # paw-zoom is still a stub (no build_parser). The renderers must
-    # not crash; they should emit a small "not implemented yet" entry.
+def test_paw_zoom_renders_a_real_entry() -> None:
+    # paw-zoom now has a real build_parser(), so its completion entry
+    # is generated from the parser — every long flag should appear in
+    # at least one of the four shell renderings.
     for shell in _completions.SUPPORTED_SHELLS:
         text = _completions.render(shell)
         assert "paw-zoom" in text
-        # The stub note appears for the stub.
-        assert "no completion data yet" in text or "no flags yet" in text, (
-            f"{shell} output should mention the zoom stub state"
-        )
+        # A known flag from the parser should make it into the output.
+        if shell == "nu":
+            assert "--zoom" in text or "--rows" in text
+        else:
+            assert "--zoom" in text or "--rows" in text
 
 
 # ---------------------------------------------------------------------------
