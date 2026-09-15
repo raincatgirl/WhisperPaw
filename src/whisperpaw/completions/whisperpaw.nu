@@ -28,6 +28,8 @@ extern "paw-sound" [
     --pack: string  # Sound pack to use.
     --volume: string  # Playback volume, 0.0–1.0 (default: 0.6).
     --quiet: string  # Suppress the announcement line (still plays the sound).
+    --list-packs: string  # Print the names of every available sound pack, one per line, and exit.
+    --list-events: string  # Print the names of every known event, one per line, and exit.
 ]
 
 # Auto-generated external completer for paw-watch.

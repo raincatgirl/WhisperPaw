@@ -23,6 +23,8 @@ complete -c paw-read -l quiet -d 'Suppress the announcement line (still speaks).
 complete -c paw-sound -l pack -d 'Sound pack to use.'
 complete -c paw-sound -l volume -d 'Playback volume, 0.0–1.0 (default: 0.6).'
 complete -c paw-sound -l quiet -d 'Suppress the announcement line (still plays the sound).'
+complete -c paw-sound -l list-packs -d 'Print the names of every available sound pack, one per line, and exit.'
+complete -c paw-sound -l list-events -d 'Print the names of every known event, one per line, and exit.'
 
 # Auto-generated completions for paw-watch.
 complete -c paw-watch -l rate -d 'Speech rate, words per minute (80–600, default: 200).'

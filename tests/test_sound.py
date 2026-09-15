@@ -106,6 +106,110 @@ def test_main_propagates_audio_backend_exit_code(monkeypatch) -> None:
     assert code == 1
 
 
+# --- discovery: list_packs / list_events ----------------------------------
+
+
+def test_list_packs_returns_known_packs_sorted() -> None:
+    """``list_packs()`` is the public discovery API and returns the
+    registered pack names in a stable, sorted order — never the raw
+    set's iteration order (which is not guaranteed in Python)."""
+    packs = sound.list_packs()
+    assert "cat" in packs
+    assert "forest" in packs
+    assert "rain" in packs
+    # Sorted: the user can rely on this for diffing / shell completion.
+    assert packs == sorted(packs)
+
+
+def test_list_events_returns_canonical_order() -> None:
+    """``list_events()`` returns the five events in their canonical
+    order (the same order they appear in KNOWN_EVENTS)."""
+    events = sound.list_events()
+    # Compare as lists (the public API returns a list) but preserve order.
+    assert list(events) == ["ok", "warn", "fail", "ready", "ding"]
+
+
+def test_list_packs_and_list_events_dont_overlap_with_resolve() -> None:
+    """The discovery helpers should be cheap and side-effect-free —
+    no file IO, no audio backend lookup."""
+    # No exception means the helpers did not touch the audio subsystem
+    # or any file path. (Audio backends would be exercised only by
+    # resolve_sound / main().)
+    sound.list_packs()
+    sound.list_events()
+
+
+def test_parse_args_list_packs_flag() -> None:
+    """``--list-packs`` parses as a boolean with the explicit dest."""
+    args = sound.parse_args(["--list-packs"])
+    assert args.list_packs is True
+    assert args.list_events is False
+
+
+def test_parse_args_list_events_flag() -> None:
+    args = sound.parse_args(["--list-events"])
+    assert args.list_events is True
+    assert args.list_packs is False
+
+
+def test_main_list_packs_prints_each_pack_and_exits_0(
+    capsys, monkeypatch
+) -> None:
+    """``paw-sound --list-packs`` prints the packs, one per line, and
+    does NOT touch the audio backend."""
+    played: list = []
+    monkeypatch.setattr(sound, "_play", lambda plan: played.append(plan) or 0)
+    code = sound.main(["--list-packs"])
+    out = capsys.readouterr().out
+    assert code == 0
+    # Every known pack on its own line.
+    lines = [ln for ln in out.splitlines() if ln]
+    assert set(lines) == set(sound.list_packs())
+    # Critical: nothing was played.
+    assert played == []
+
+
+def test_main_list_events_prints_each_event_and_exits_0(
+    capsys, monkeypatch
+) -> None:
+    """``paw-sound --list-events`` prints the events, one per line, and
+    does NOT touch the audio backend."""
+    played: list = []
+    monkeypatch.setattr(sound, "_play", lambda plan: played.append(plan) or 0)
+    code = sound.main(["--list-events"])
+    out = capsys.readouterr().out
+    assert code == 0
+    lines = [ln for ln in out.splitlines() if ln]
+    assert lines == list(sound.list_events())
+    assert played == []
+
+
+def test_main_list_packs_does_not_print_banner(capsys, monkeypatch) -> None:
+    """Discovery mode skips the "playing" announcement — there is
+    nothing to announce."""
+    monkeypatch.setattr(sound, "_play", lambda plan: 0)
+    code = sound.main(["--list-packs"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "playing" not in out.lower()
+    assert "🐾" not in out
+
+
+def test_main_list_packs_ignores_event_argument(capsys, monkeypatch) -> None:
+    """``paw-sound --list-packs fail`` should still list packs, not try
+    to resolve a sound (the discovery flag wins regardless of any
+    positional event name)."""
+    played: list = []
+    monkeypatch.setattr(sound, "_play", lambda plan: played.append(plan) or 0)
+    code = sound.main(["--list-packs", "fail"])
+    out = capsys.readouterr().out
+    assert code == 0
+    # Packs, not the fail event:
+    assert "fail" not in out
+    assert "cat" in out
+    assert played == []
+
+
 # --- pack listing --------------------------------------------------------
 
 

@@ -55,6 +55,10 @@ make && paw-sound --pack forest ok
 # Or a rainy pack
 paw-sound --pack rain ding
 
+# Discover what's available without playing anything
+paw-sound --list-packs     # cat / forest / rain
+paw-sound --list-events    # ok / warn / fail / ready / ding
+
 # Tail a long build and hear each new line as it appears
 paw-watch --max-lines 20 -- make
 

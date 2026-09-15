@@ -30,7 +30,9 @@ _paw_sound() {
   _arguments -s \
     '--pack[Sound pack to use.]' \
     '--volume[Playback volume, 0.0–1.0 (default: 0.6).]' \
-    '--quiet[Suppress the announcement line (still plays the sound).]'
+    '--quiet[Suppress the announcement line (still plays the sound).]' \
+    '--list-packs[Print the names of every available sound pack, one per line, and exit.]' \
+    '--list-events[Print the names of every known event, one per line, and exit.]'
 }
 _paw_sound "$@"
 

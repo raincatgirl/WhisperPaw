@@ -337,3 +337,66 @@
   waiting: a third `paw-sound` pack (`rain` / `keyboard`), or
   moving paw-read's Piper backend into a documented separate
   plugin path.
+
+## 2026-09-15 — `paw-sound` grows discovery flags
+
+- Added two new flags to `paw-sound`:
+  - `--list-packs` — prints every available pack name, one per
+    line, then exits 0. No sound is played.
+  - `--list-events` — prints every known event name in canonical
+    order, then exits 0. No sound is played.
+- The flags exist primarily for **discoverability and shell
+  completion**. The four static completion files (bash / zsh /
+  fish / nushell) under `src/whisperpaw/completions/` are now
+  regenerated — the existing `test_shipped_static_file_matches_live_render`
+  test caught them being out of sync and forced a regen. Adding
+  any new flag to `paw-sound` will now automatically show up in
+  Tab completion the next time the user re-sources the file.
+- Both new flags short-circuit in `main()` *before* any audio
+  resolution, so a user can run `paw-sound --list-packs` on a
+  system with no audio backend and still get the answer (instead
+  of the "no audio backend found" message that the playing path
+  would emit). The discovery flags deliberately take priority
+  over any positional `event` argument — `paw-sound --list-packs
+  fail` still lists packs.
+- Exposed the same data as plain functions:
+  - `whisperpaw.sound.list_packs()` returns the registered pack
+    names sorted alphabetically.
+  - `whisperpaw.sound.list_events()` returns the event names in
+    the canonical `("ok", "warn", "fail", "ready", "ding")` order.
+  These are public so `paw-complete` (and any future test or
+  shell wrapper) can ask "what's available?" without parsing
+  the argparse layer.
+- Added 9 new tests in `tests/test_sound.py`:
+  - `list_packs()` is sorted and contains every registered pack
+  - `list_events()` returns the five events in canonical order
+  - both helpers are side-effect-free (no audio backend touched,
+    no file IO)
+  - `--list-packs` and `--list-events` parse as booleans with
+    the explicit `dest=` (the rest of the test suite relies on
+    that pattern)
+  - `main()` with each flag prints the right text, exits 0,
+    never calls `_play`, never prints the "playing" banner
+  - `main()` with `--list-packs fail` still lists packs (the
+    discovery flag wins over the positional event)
+- Regenerated the four static completion files
+  (`whisperpaw.{bash,zsh,fish,nu}`) so the shipped bytes match
+  the live generator. The sync test now passes for all four
+  shells.
+- Total: **160/160 tests green** (9 new + 151 existing).
+- Behaviour: pure stdlib, no telemetry, no network. The flags
+  are cheap (a few `print()` calls) and never touch the audio
+  device.
+- Next tick: `paw-zoom` is the only planned tool left; it is
+  meaningfully bigger than a single short tick (needs a real
+  data model for the area under the cursor, plus a render
+  loop, plus cross-platform screen capture). A natural break
+  for it: first tick = design + an ASCII-only proof of concept
+  that prints the magnifier region to stdout; second tick =
+  add a real render path (Linux/macOS first, Windows is harder
+  and may be a third tick). Other reasonable one-tick
+  directions: a small bug-fix pass (e.g. the misleading "we
+  route through a temp file" comment in `paw-read`'s macOS /
+  Windows Piper playback path — the code actually pipes via
+  stdin), a `--json` output mode for `paw-sound --list-packs`,
+  or a fourth sound pack if the user asks for one.

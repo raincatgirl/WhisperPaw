@@ -25,13 +25,13 @@ _paw_complete_paw_read() {
 complete -F _paw_complete_paw_read paw-read
 
 _paw_sound_flags() {
-  COMPREPLY=(--pack --volume --quiet)
+  COMPREPLY=(--pack --volume --quiet --list-packs --list-events)
 }
 _paw_complete_paw_sound() {
   local cur prev
   cur="${COMP_WORDS[COMP_CWORD]}"
   if [[ "$cur" == --* ]]; then
-    COMPREPLY=($(compgen -W '--pack --volume --quiet' -- "$cur"))
+    COMPREPLY=($(compgen -W '--pack --volume --quiet --list-packs --list-events' -- "$cur"))
     return 0
   fi
   # No subcommands; nothing else to complete.

@@ -44,6 +44,24 @@ KNOWN_PACKS: frozenset[str] = frozenset({"cat", "forest", "rain"})
 #: wins. Supported extensions: wav, mp3, ogg, flac.
 KNOWN_EVENTS: tuple[str, ...] = ("ok", "warn", "fail", "ready", "ding")
 
+
+def list_packs() -> list[str]:
+    """Return the known sound pack names, sorted alphabetically.
+
+    Public API so ``paw-complete`` and tests can enumerate what's
+    available without depending on the ``argparse`` layer.
+    """
+    return sorted(KNOWN_PACKS)
+
+
+def list_events() -> list[str]:
+    """Return the known event names, in their canonical order.
+
+    Same rationale as :func:`list_packs` — public so other modules
+    (and tests) can ask what's available without parsing the parser.
+    """
+    return list(KNOWN_EVENTS)
+
 #: File extensions we know how to feed to a system player.
 _AUDIO_EXTS: tuple[str, ...] = (".wav", ".mp3", ".ogg", ".flac")
 
@@ -101,6 +119,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--quiet",
         action="store_true",
         help="Suppress the announcement line (still plays the sound).",
+    )
+    parser.add_argument(
+        "--list-packs",
+        action="store_true",
+        dest="list_packs",
+        help=(
+            "Print the names of every available sound pack, one per line, "
+            "and exit. Nothing is played. Useful for discovery and for "
+            "shell completion."
+        ),
+    )
+    parser.add_argument(
+        "--list-events",
+        action="store_true",
+        dest="list_events",
+        help=(
+            "Print the names of every known event, one per line, and exit. "
+            "Nothing is played. Useful for discovery and for shell completion."
+        ),
     )
     return parser
 
@@ -248,9 +285,25 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point — returns a process exit code."""
     try:
         args = parse_args(argv)
-        plan = resolve_sound(args.event, args.pack)
     except SystemExit as exc:
         # argparse / explicit validation raised SystemExit already
+        return int(exc.code) if isinstance(exc.code, int) else 2
+
+    # Discovery flags short-circuit before any audio resolution — they
+    # are mutually exclusive with playing a sound, and they don't need
+    # to touch the audio device.
+    if args.list_packs:
+        for name in list_packs():
+            print(name)
+        return 0
+    if args.list_events:
+        for name in list_events():
+            print(name)
+        return 0
+
+    try:
+        plan = resolve_sound(args.event, args.pack)
+    except SystemExit as exc:
         return int(exc.code) if isinstance(exc.code, int) else 2
     except ValueError as exc:
         print(f"paw-sound: {exc}", file=sys.stderr)
