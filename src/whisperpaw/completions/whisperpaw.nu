@@ -60,4 +60,6 @@ extern "paw-zoom" [
     --charset: string  # Fill character for empty cells: 'space' (default, invisible), 'hash' (#), or 'd…
     --quiet: string  # Suppress the announcement line (still renders).
     --snapshot: string  # Write the rendered viewport to PATH instead of stdout.
+    --live: string  # Follow --file PATH like 'tail -f': re-render the magnified viewport every time…
+    --interval: string  # Poll interval in seconds for --live (default: 0.25, must be > 0).
 ]

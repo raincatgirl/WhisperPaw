@@ -450,3 +450,235 @@ def test_main_snapshot_stdin_source(tmp_path, monkeypatch) -> None:
     assert rc == 0
     text = out.read_text(encoding="utf-8")
     assert "from stdin" in text
+
+
+# ---------------------------------------------------------------------------
+# --live / --interval
+# ---------------------------------------------------------------------------
+
+
+def test_default_live_interval_is_sensible() -> None:
+    """The default poll interval is small but positive — visible to
+    the user, not a CPU hog. Anything outside 0.05–2.0s is probably
+    a bug."""
+    assert 0.05 <= zoom.DEFAULT_LIVE_INTERVAL <= 2.0
+
+
+def test_live_requires_file(tmp_path, monkeypatch) -> None:
+    """--live without --file is a usage error (exit 2) — there is no
+    stdin to tail."""
+    monkeypatch.setenv("WPAW_ZOOM_STDIN_OVERRIDE", "")
+    # Intentionally no --file.
+    with pytest.raises(SystemExit) as exc:
+        zoom.parse_args(["--live", "hello"])
+    assert exc.value.code == 2
+
+
+def test_live_rejects_zero_interval(tmp_path) -> None:
+    """--interval must be strictly > 0 — otherwise the loop spins."""
+    src = tmp_path / "log.txt"
+    src.write_text("first\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        zoom.parse_args(["--live", "--file", str(src), "--interval", "0"])
+    assert exc.value.code == 2
+
+
+def test_live_rejects_negative_interval(tmp_path) -> None:
+    """Negative --interval is also a usage error (exit 2)."""
+    src = tmp_path / "log.txt"
+    src.write_text("first\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        zoom.parse_args(["--live", "--file", str(src), "--interval", "-0.5"])
+    assert exc.value.code == 2
+
+
+def test_live_help_text_includes_key_flag() -> None:
+    """The --help text must mention --live and --interval so the
+    tool is discoverable (and the test catches accidental renames)."""
+    parser = zoom.build_parser()
+    help_text = parser.format_help()
+    assert "--live" in help_text
+    assert "--interval" in help_text
+
+
+def test_tail_and_render_first_frame(tmp_path) -> None:
+    """_tail_and_render emits one frame for a file that exists on
+    the first poll, then stops on a predicate."""
+    src = tmp_path / "log.txt"
+    src.write_text("line one\nline two\n", encoding="utf-8")
+    cfg = zoom.ZoomConfig(rows=2, cols=8, zoom=1)
+    frames: list[str] = []
+
+    # Run exactly two iterations (one frame + one no-op sleep),
+    # then bail.
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        return ticks["n"] >= 2
+
+    rc = zoom._tail_and_render(
+        str(src),
+        cfg,
+        interval=0.0,
+        stop_predicate=stop,
+        clock=lambda _x: None,  # no real sleep
+        sink=frames.append,
+    )
+    assert rc == 0
+    assert len(frames) == 1
+    # The first frame is the magnified viewport of the source.
+    assert "line one" in frames[0]
+
+
+def test_tail_and_render_skips_unchanged_polls(tmp_path) -> None:
+    """If the file is unchanged across many polls, only one frame
+    is rendered — the change-detector works."""
+    src = tmp_path / "log.txt"
+    src.write_text("hello\n", encoding="utf-8")
+    cfg = zoom.ZoomConfig(rows=2, cols=5, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        return ticks["n"] >= 5
+
+    zoom._tail_and_render(
+        str(src),
+        cfg,
+        interval=0.0,
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        sink=frames.append,
+    )
+    assert len(frames) == 1
+
+
+def test_tail_and_render_emits_frame_on_append(tmp_path) -> None:
+    """If the file is appended to, a new frame is rendered."""
+    src = tmp_path / "log.txt"
+    src.write_text("v1\n", encoding="utf-8")
+    cfg = zoom.ZoomConfig(rows=2, cols=8, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        # On the second tick, append. The third tick should see it.
+        if ticks["n"] == 2:
+            with open(src, "a", encoding="utf-8") as fh:
+                fh.write("v2\n")
+        return ticks["n"] >= 3
+
+    zoom._tail_and_render(
+        str(src),
+        cfg,
+        interval=0.0,
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        sink=frames.append,
+    )
+    # Two distinct frames: one for "v1", one for "v1\nv2".
+    assert len(frames) == 2
+    assert "v1" in frames[0]
+    assert "v2" in frames[1]
+
+
+def test_tail_and_render_handles_missing_file(tmp_path) -> None:
+    """If the source file does not exist on the first poll, the
+    loop does not crash — it prints to stderr and continues until
+    the stop predicate fires."""
+    src = tmp_path / "does_not_exist.txt"
+    cfg = zoom.ZoomConfig(rows=2, cols=5, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        return ticks["n"] >= 2
+
+    rc = zoom._tail_and_render(
+        str(src),
+        cfg,
+        interval=0.0,
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        sink=frames.append,
+    )
+    assert rc == 0
+    assert frames == []  # no frames emitted, no crash
+
+
+def test_tail_and_render_creates_then_follows(tmp_path) -> None:
+    """If the source file appears on a later poll, the loop picks
+    it up. This mirrors log rotation: the new file is followed
+    after the rotation completes."""
+    src = tmp_path / "log.txt"
+    cfg = zoom.ZoomConfig(rows=2, cols=8, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        # On the second tick, create the file. The third tick
+        # should see it.
+        if ticks["n"] == 2:
+            src.write_text("late\n", encoding="utf-8")
+        return ticks["n"] >= 3
+
+    zoom._tail_and_render(
+        str(src),
+        cfg,
+        interval=0.0,
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        sink=frames.append,
+    )
+    assert len(frames) == 1
+    assert "late" in frames[0]
+
+
+def test_read_file_text_empty(tmp_path) -> None:
+    """_read_file_text returns "" for an empty file (no exception)."""
+    src = tmp_path / "empty.txt"
+    src.write_text("", encoding="utf-8")
+    assert zoom._read_file_text(str(src)) == ""
+
+
+def test_main_live_writes_to_snapshot_on_change(tmp_path) -> None:
+    """--live + --snapshot: each frame is written to the snapshot
+    file (overwriting). After appending, the snapshot file should
+    contain the new content."""
+    src = tmp_path / "log.txt"
+    src.write_text("alpha\n", encoding="utf-8")
+    out = tmp_path / "shot.txt"
+    cfg = zoom.ZoomConfig(rows=2, cols=8, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        if ticks["n"] == 2:
+            with open(src, "a", encoding="utf-8") as fh:
+                fh.write("beta\n")
+        return ticks["n"] >= 3
+
+    def sink(text: str) -> None:
+        frames.append(text)
+        out.write_text(text, encoding="utf-8")
+
+    rc = zoom._tail_and_render(
+        str(src),
+        cfg,
+        interval=0.0,
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        sink=sink,
+    )
+    assert rc == 0
+    assert len(frames) == 2
+    # The final snapshot file is the LAST frame, not the first.
+    final = out.read_text(encoding="utf-8")
+    assert "beta" in final
+    assert "alpha" in final

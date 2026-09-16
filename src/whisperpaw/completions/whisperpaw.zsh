@@ -66,6 +66,8 @@ _paw_zoom() {
     '--zoom[Magnification factor: each source cell becomes a --zoom×--zoom block (default:…]' \
     '--charset[Fill character for empty cells: ''space'' (default, invisible), ''hash'' (#), or ''d…]' \
     '--quiet[Suppress the announcement line (still renders).]' \
-    '--snapshot[Write the rendered viewport to PATH instead of stdout.]'
+    '--snapshot[Write the rendered viewport to PATH instead of stdout.]' \
+    '--live[Follow --file PATH like ''tail -f'': re-render the magnified viewport every time…]' \
+    '--interval[Poll interval in seconds for --live (default: 0.25, must be > 0).]'
 }
 _paw_zoom "$@"

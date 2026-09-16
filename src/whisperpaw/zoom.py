@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
@@ -243,6 +244,107 @@ def render_viewport(source: str, cfg: ZoomConfig) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Live / "follow" mode
+# ---------------------------------------------------------------------------
+
+
+#: Default poll interval for ``--live`` (seconds). Small enough that
+#: the user sees new lines almost immediately, large enough that we
+#: aren't a CPU hog. 250 ms is the same order of magnitude as
+#: ``paw-watch``'s 0.1s ``--follow`` cadence.
+DEFAULT_LIVE_INTERVAL: float = 0.25
+
+
+def _read_file_text(path: str) -> str:
+    """Read ``path`` as UTF-8 text. Returns ``""`` if the file is empty.
+
+    A small wrapper so the live loop has one obvious call site for
+    "re-read the source now". Errors (missing file, permission denied)
+    propagate — the caller decides how to surface them.
+    """
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        return fh.read()
+
+
+def _tail_and_render(
+    path: str,
+    cfg: ZoomConfig,
+    *,
+    interval: float,
+    stop_predicate=None,
+    clock=None,
+    sink=None,
+) -> int:
+    """Follow ``path`` and re-render the magnified viewport on each change.
+
+    Loops until ``stop_predicate()`` returns truthy (or forever, if not
+    given). On every iteration:
+
+    1. Re-read the file from disk.
+    2. If the contents changed since the previous iteration, re-render
+       the viewport and write it to ``sink`` — a callable taking a
+       single ``str`` argument. Defaults to writing the rendered
+       viewport + a blank line to ``sys.stdout``. Tests can pass a
+       list-collector to inspect each frame.
+    3. Sleep ``interval`` seconds using ``clock()`` (defaults to
+       :func:`time.sleep`; tests can pass a fake clock that returns
+       immediately).
+
+    Returns ``0`` on a clean exit. Errors are surfaced as a single
+    stderr line and the loop continues — a transient ENOENT during
+    log rotation shouldn't kill the magnifier.
+
+    Note: this is the **text-source** tail (like ``tail -f`` for a log
+    file). It is not the real screen-capture tail that v0.2 will
+    need. But the loop shape is identical, so this can be reused.
+    """
+    sleep = clock if clock is not None else time.sleep
+    last_text: str | None = None
+    last_mtime: float | None = None
+    while stop_predicate is None or not stop_predicate():
+        try:
+            text = _read_file_text(path)
+        except FileNotFoundError:
+            print(
+                f"paw-zoom: --live source not found: {path!r}",
+                file=sys.stderr,
+            )
+            sleep(interval)
+            continue
+        except OSError as exc:
+            print(
+                f"paw-zoom: could not read --live source {path!r}: {exc}",
+                file=sys.stderr,
+            )
+            sleep(interval)
+            continue
+        # Cheap "did it change?" check: mtime. If the mtime moved,
+        # something may have been appended (or rotated; we re-read
+        # unconditionally so rotation is safe). Avoids re-rendering
+        # the same N kB of text on every poll.
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = None
+        if text == last_text and mtime == last_mtime:
+            sleep(interval)
+            continue
+        last_text = text
+        last_mtime = mtime
+        rendered = render_viewport(text, cfg)
+        if sink is not None:
+            sink(rendered)
+        else:
+            sys.stdout.write(rendered)
+            # Frame separator. A blank line keeps successive frames
+            # visually distinct in scrollback.
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        sleep(interval)
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 
@@ -338,6 +440,26 @@ def build_parser() -> argparse.ArgumentParser:
             "announcement line (unless --quiet) still goes to stderr."
         ),
     )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help=(
+            "Follow --file PATH like 'tail -f': re-render the magnified "
+            "viewport every time the source changes. Implies --file. "
+            "Press Ctrl-C to stop. The poll interval is --interval "
+            f"(default: {DEFAULT_LIVE_INTERVAL:g}s)."
+        ),
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=DEFAULT_LIVE_INTERVAL,
+        metavar="SECS",
+        help=(
+            "Poll interval in seconds for --live (default: "
+            f"{DEFAULT_LIVE_INTERVAL:g}, must be > 0)."
+        ),
+    )
     return parser
 
 
@@ -361,6 +483,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if not (MIN_ZOOM <= args.zoom <= MAX_ZOOM):
         print(
             f"paw-zoom: --zoom must be between {MIN_ZOOM} and {MAX_ZOOM}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if args.interval <= 0:
+        print(
+            "paw-zoom: --interval must be > 0 seconds",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if args.live and not args.file:
+        print(
+            "paw-zoom: --live requires --file PATH "
+            "(there is no stdin to tail)",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -408,6 +543,41 @@ def main(argv: list[str] | None = None) -> int:
             f"🐾 paw-zoom: {cfg.rows}×{cfg.cols} window, "
             f"zoom {cfg.zoom}, output {cfg.rows * cfg.zoom}×{cfg.cols * cfg.zoom}"
         )
+
+    if args.live:
+        # Live mode: re-render on every change until Ctrl-C.
+        # If --snapshot is also set, each frame is written to the
+        # file (overwriting the previous one) so an external
+        # viewer can `cat` it to see the latest viewport. Without
+        # --snapshot, each frame is written to stdout separated
+        # by a blank line.
+        snapshot_path = args.snapshot
+
+        def _sink(text: str) -> None:
+            if snapshot_path is not None:
+                try:
+                    with open(snapshot_path, "w", encoding="utf-8") as fh:
+                        fh.write(text)
+                except OSError as exc:
+                    print(
+                        f"paw-zoom: could not write --snapshot file "
+                        f"{snapshot_path!r}: {exc}",
+                        file=sys.stderr,
+                    )
+            else:
+                sys.stdout.write(text)
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+
+        try:
+            return _tail_and_render(
+                args.file, cfg, interval=args.interval, sink=_sink
+            )
+        except KeyboardInterrupt:
+            # Ctrl-C is a clean exit in --live mode. Don't print
+            # a traceback.
+            return 0
+
     try:
         rendered = render_viewport(source, cfg)
     except ValueError as exc:

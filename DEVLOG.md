@@ -800,3 +800,71 @@ next-step candidates are:
 - Total: **263/263 tests green** (8 new + 255 existing).
 - v0.2 (real screen-capture render, Linux/macOS first) is the
   next meaningful tick. This change does not interfere.
+
+## 2026-09-16 — `paw-zoom` v0.1.x: add `--live` / `--interval`
+
+- Added two new flags to `paw-zoom`:
+  - `--live` — follow `--file PATH` like `tail -f` and re-render
+    the magnified viewport every time the source changes. The
+    loop is mtime-tracked (so an idle file emits no frames) and
+    Ctrl-C is a clean exit.
+  - `--interval SECS` — poll cadence for `--live` (default 0.25s,
+    must be > 0).
+- The new mode composes with `--snapshot PATH`: when both are
+  set, each frame rewrites the snapshot file in place, so an
+  external viewer can `cat` it to see the latest viewport.
+- **Why now.** `paw-zoom` v0.1 only ever rendered a *snapshot*
+  of text. The v0.2 real-screen-capture render is still a few
+  ticks out, but the *loop shape* (poll → read → render → sleep)
+  is identical between the text and visual cases. So shipping
+  `--live` for the text source now lets us (a) give the v0.1
+  ASCII magnifier a real use case as a log magnifier, and (b)
+  validate the loop primitives that v0.2 will need anyway.
+- **Pure stdlib.** No new dependencies. The loop uses
+  `time.sleep` (or a test-injected clock), `os.path.getmtime`
+  for the change-detector, and `os.open(..., errors="replace")`
+  to avoid the UTF-8-decode crash on a half-written line.
+- **Error handling.** `--live` without `--file` is a usage
+  error (exit 2) — there is no stdin to tail. `--interval 0`
+  and `--interval < 0` are also usage errors. A file that does
+  not exist on the first poll does not crash the loop; the
+  magnifier prints a one-line message to stderr and waits.
+  The change-detector also handles late creation (a file that
+  appears on a later poll is picked up) — the same code path
+  covers log rotation in the wild.
+- **Tests.** 12 new tests in `tests/test_zoom.py`:
+  - the `DEFAULT_LIVE_INTERVAL` constant is in a sensible range;
+  - `--live` requires `--file` (exit 2);
+  - `--interval` rejects 0 and negative values (exit 2);
+  - the help text mentions both flags;
+  - `_tail_and_render` emits exactly one frame on the first
+    poll, then no more if the file is unchanged;
+  - `_tail_and_render` emits a second frame when the file is
+    appended to (using the test's stop-predicate as the
+    "appender");
+  - a missing source file does not crash the loop;
+  - a source file that is *created* on a later poll is picked
+    up (rotation coverage);
+  - `_read_file_text` returns `""` for an empty file;
+  - `--live` + `--snapshot` correctly overwrites the snapshot
+    on each frame.
+- All four static shell-completion files
+  (`src/whisperpaw/completions/whisperpaw.{bash,zsh,fish,nu}`)
+  were regenerated. The new `--live` and `--interval` flags now
+  appear in Tab completion for all four shells (the byte-
+  identity test in `tests/test_completions.py` caught the
+  drift and failed loudly — that's why this tick is the one
+  that fixed it).
+- Added `scripts/regen_completions.py` so the regeneration
+  step is a single command from a fresh checkout. Writes
+  atomically (tmp + rename) so a half-written file can't
+  break a running Tab completion.
+- **Total: 275/275 green** (12 new + 263 existing).
+  Pure stdlib, no new deps, no telemetry, no network.
+- **Next tick.** `paw-zoom` v0.2 — the real screen-capture
+  render. The `--live` loop shape is now proven on a text
+  source, so v0.2 can plug a per-OS capture adapter in
+  front of `_tail_and_render` without changing the math
+  or the CLI. Likely still two ticks: (a) adapter skeleton
+  + a Linux Wayland/X11 adapter, (b) the macOS /
+  Windows adapters.
