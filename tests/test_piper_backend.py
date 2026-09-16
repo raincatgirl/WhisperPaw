@@ -121,3 +121,74 @@ def test_main_piper_no_binary_exits_nonzero(monkeypatch, capsys) -> None:
     assert code == 2
     err = capsys.readouterr().err
     assert "piper" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# _pcm_playback_cmd — the platform-picker that pairs Piper's raw-PCM stdout
+# with a per-OS audio sink. Two of the three branches used to carry
+# comments claiming "we route through a temp file"; the actual code in
+# _piper_speak pipes Piper's stdout into `play_proc.stdin` via a background
+# thread, with no temp file anywhere. These tests pin down the contract:
+# the returned command must be a plain argv list the caller can Popen with
+# stdin=PIPE, and there must be no tempfile import involved.
+# ---------------------------------------------------------------------------
+
+
+def test_pcm_playback_cmd_darwin_returns_afplay_stdin(monkeypatch) -> None:
+    monkeypatch.setattr(read.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(read.shutil, "which", lambda name: "/usr/bin/afplay" if name == "afplay" else None)
+    cmd = read._pcm_playback_cmd()
+    assert cmd == ["afplay", "-"]
+
+
+def test_pcm_playback_cmd_windows_returns_powershell_stdin(monkeypatch) -> None:
+    monkeypatch.setattr(read.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        read.shutil, "which", lambda name: "C:/powershell" if name == "powershell" else None
+    )
+    cmd = read._pcm_playback_cmd()
+    assert cmd is not None
+    # The command must read PCM from stdin (via $input), so the caller
+    # can pipe Piper's stdout into it without a temp file.
+    assert cmd[0] == "powershell"
+    assert "$input" in cmd
+
+
+def test_pcm_playback_cmd_linux_returns_aplay_with_pcm_flags(monkeypatch) -> None:
+    monkeypatch.setattr(read.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(read.shutil, "which", lambda name: "/usr/bin/aplay" if name == "aplay" else None)
+    cmd = read._pcm_playback_cmd()
+    assert cmd is not None
+    assert cmd[0] == "aplay"
+    # The PCM-format flags (22050 Hz, mono, s16le) tell aplay the exact
+    # shape of what Piper's --output-raw will produce on its stdout.
+    assert "S16_LE" in cmd
+    assert "22050" in cmd
+
+
+def test_pcm_playback_cmd_returns_none_when_no_player(monkeypatch) -> None:
+    monkeypatch.setattr(read.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(read.shutil, "which", lambda name: None)
+    assert read._pcm_playback_cmd() is None
+
+
+def test_pcm_playback_cmd_does_not_use_tempfile() -> None:
+    """Regression: the old comments on the Darwin/Windows branches said
+    'we route through a temp file'. The actual implementation pipes raw
+    PCM into the player's stdin via the _pump thread in _piper_speak; no
+    temp file is ever written. This test guards that contract by
+    asserting ``tempfile`` is never imported or referenced in the
+    _pcm_playback_cmd body."""
+    import ast
+    import inspect
+
+    source = inspect.getsource(read._pcm_playback_cmd)
+    # No mention of tempfile / TemporaryFile anywhere in the function body.
+    assert "tempfile" not in source
+    assert "TemporaryFile" not in source
+    # And the function itself is small — parse it as a sanity check that
+    # we are reading the right definition.
+    tree = ast.parse(source)
+    funcs = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
+    assert len(funcs) == 1
+    assert funcs[0].name == "_pcm_playback_cmd"

@@ -564,10 +564,12 @@ def _pcm_playback_cmd() -> list[str] | None:
             if shutil.which(tool[0]):
                 return tool
     if system == "Darwin" and shutil.which("afplay"):
-        # afplay doesn't take raw PCM flags; we route through a temp file.
+        # afplay reads PCM from stdin (`-`); the _pump thread in
+        # _piper_speak streams Piper's stdout directly into it.
         return ["afplay", "-"]
     if system == "Windows" and shutil.which("powershell"):
-        # PowerShell SoundPlayer doesn't take raw PCM; we use a temp file.
+        # PowerShell's $input reads PCM from the pipeline; the _pump
+        # thread in _piper_speak streams Piper's stdout into it.
         return ["powershell", "-NoProfile", "-Command", "$input"]
     return None
 

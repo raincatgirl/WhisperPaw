@@ -672,3 +672,107 @@ new third-party deps. No telemetry. No network.
   still lists `paw-zoom` as `has_parser=False` even though it
   now has a real parser. One-line fix; should ride along with
   the next real paw-zoom tick.
+
+---
+
+## 2026-09-16 — docs/cleanup tick (misleading comments + dead metadata)
+
+Two small but real cleanups the previous tick's "what's next" called
+out, bundled into one atomic tick so neither has to wait for a
+bigger one to come along.
+
+**What changed.**
+
+1. **`paw-read._pcm_playback_cmd` — two wrong comments.** The
+   `Darwin` and `Windows` branches both carried `# we route through
+   a temp file` in their inline comments. The actual code in
+   `_piper_speak` does no such thing: Piper is spawned with
+   `stdout=PIPE`, the audio sink is spawned with `stdin=PIPE`, and
+   a background thread (`_pump`) streams Piper's raw-PCM stdout
+   straight into the sink's stdin. No temp file is ever written or
+   read. Rewrote both comments to point the reader at the
+   `_pump` thread, which is where the real plumbing lives.
+
+2. **`_completions` — the `has_parser` field was dead.** The
+   `_Tool` dataclass already carried a `has_parser: bool` flag, and
+   `paw-zoom` was registered with `has_parser=False` (because
+   v0.1 hadn't shipped yet when the completions tick ran). But the
+   flag was never read — `_load_parser` always attempted the import
+   and silently returned `None` on failure, which meant
+   `paw-zoom`'s real `build_parser()` was happily being discovered
+   the whole time. That accidentally worked, but it meant:
+
+   * The metadata lied about the codebase (it said "stub" when the
+     module had a real parser).
+   * The fast-path opt-out the field was designed for didn't exist
+     — a future stub tool would have triggered a real import + a
+     try/except on every render, instead of a deterministic
+     no-op.
+
+   Fixed by:
+   * Adding a `has_parser: bool = True` keyword-only argument to
+     `_load_parser` and short-circuiting to `None` when False (so
+     the import is genuinely skipped).
+   * Threading `tool.has_parser` through all four renderers
+     (`_render_bash`, `_render_zsh`, `_render_fish`, `_render_nu`).
+   * Flipping `paw-zoom` to the default `has_parser=True` (now
+     that it has a real `build_parser()`).
+   * Expanding the docstring on `_TOOLS` to explain *why* a
+     declarative stub flag is safer than a runtime try/except
+     (a future `build_parser()` could silently succeed before
+     the rest of the tool is ready to ship).
+
+**Tests.** 9 new tests across two files:
+
+* `tests/test_piper_backend.py` — 5 new tests pinning the
+  `_pcm_playback_cmd` contract on each platform (Darwin → afplay
+  `-`, Windows → powershell `$input`, Linux → aplay with the
+  22050 Hz S16_LE flags) plus a regression test that asserts the
+  function body contains no `tempfile` / `TemporaryFile`
+  reference.
+* `tests/test_completions.py` — 4 new tests pinning the
+  `has_parser` semantics: `_load_parser(..., has_parser=False)`
+  returns `None` without importing the module
+  (monkey-patched `import_module` would raise); the default
+  `has_parser=True` path actually loads and returns the real
+  argparse parser; a fabricated stub module with a
+  `build_parser()` is still bypassed when `has_parser=False`;
+  and the `_TOOLS` registry no longer flags `paw-zoom` as a
+  stub (guard against a regression re-introducing the old
+  metadata).
+
+Also tweaked two pre-existing comments in
+`tests/test_completions.py` that still talked about "the zoom
+stub" / "paw-zoom now has" — those are now misleading in the
+present tense.
+
+**Bookkeeping.** No static completion files needed regenerating.
+The byte-identity test in `tests/test_completions.py` confirms
+all four shipped files (`completions/whisperpaw.{bash,zsh,fish,nu}`)
+are still byte-identical to the live `render()` output. The
+behaviour change is internal to `_load_parser` and is
+invisible to the rendered output as long as every shipped tool
+has `has_parser=True` (which is now the case).
+
+**Total: 255/255 green** (9 new + 246 existing). Pure stdlib.
+No new third-party deps. No telemetry. No network.
+
+**Next tick.** With the small stuff tidied, the natural
+next-step candidates are:
+
+* **`paw-zoom` v0.2** — real screen-capture render. The data
+  model and viewport math are already there from the v0.1
+  POC; this would plug a per-OS adapter (Linux / macOS /
+  Windows) in front of `render_viewport` without changing
+  the math or the CLI. Still a multi-step tick — probably
+  the "data model + adapter skeleton" half this time, then
+  the actual render next.
+* **A genuinely new sound pack** — e.g. a `keyboard` pack
+  (mechanical clack, soft membrane, spacebar thud) or
+  `cafe` (chatter murmur, espresso hiss, saucer clink).
+  The synthesis helpers in `_synth_sounds.py` /
+  `_synth_forest.py` / `_synth_rain.py` are short and
+  well-trodden; one new pack is well within a single
+  tick. Only worth doing if the user wants it, though —
+  the three ambient moods already cover the major
+  accessibility needs.

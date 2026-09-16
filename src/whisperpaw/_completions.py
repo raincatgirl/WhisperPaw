@@ -47,8 +47,12 @@ from typing import Callable, Iterable, Sequence
 
 #: The list of (module-name, CLI name) pairs we know about. New tools
 #: should be added here. Tools without a ``build_parser()`` (e.g. still
-#: stubs) are listed with ``has_parser=False`` so the completion files
-#: still build, but they emit a minimal "no flags yet" entry.
+#: stubs) are listed with ``has_parser=False`` so the renderers skip
+#: the import entirely and emit a minimal "no flags yet" entry — this
+#: is safer than relying on a runtime try/except, which can silently
+#: succeed against a future ``build_parser()`` before the rest of the
+#: tool is ready to ship.
+#:
 @dataclass(frozen=True)
 class _Tool:
     module: str
@@ -60,7 +64,7 @@ _TOOLS: tuple[_Tool, ...] = (
     _Tool("whisperpaw.read", "paw-read"),
     _Tool("whisperpaw.sound", "paw-sound"),
     _Tool("whisperpaw.watch", "paw-watch"),
-    _Tool("whisperpaw.zoom", "paw-zoom", has_parser=False),
+    _Tool("whisperpaw.zoom", "paw-zoom"),
 )
 
 
@@ -123,10 +127,20 @@ _HEADER_TEMPLATE = """\
 """
 
 
-def _load_parser(module_name: str) -> argparse.ArgumentParser | None:
+def _load_parser(
+    module_name: str, *, has_parser: bool = True
+) -> argparse.ArgumentParser | None:
     """Import ``module_name`` and return its ``build_parser()`` result,
     or ``None`` if the module doesn't expose one yet (e.g. it's still
-    a stub)."""
+    a stub).
+
+    When ``has_parser`` is ``False`` we deliberately skip the import:
+    the module is known to be a stub, so we want a no-op completion
+    rather than a try/except that might silently succeed against a
+    future build_parser() before the rest of the tool is ready.
+    """
+    if not has_parser:
+        return None
     try:
         mod = importlib.import_module(module_name)
     except Exception:
@@ -196,7 +210,7 @@ def _collect_positionals(parser: argparse.ArgumentParser) -> list[tuple[str, str
 
 
 def _render_bash(tool: _Tool) -> str:
-    parser = _load_parser(tool.module)
+    parser = _load_parser(tool.module, has_parser=tool.has_parser)
     flags = _collect_flags(parser) if parser is not None else []
     positionals = _collect_positionals(parser) if parser is not None else []
 
@@ -233,7 +247,7 @@ def _render_bash(tool: _Tool) -> str:
 
 
 def _render_zsh(tool: _Tool) -> str:
-    parser = _load_parser(tool.module)
+    parser = _load_parser(tool.module, has_parser=tool.has_parser)
     flags = _collect_flags(parser) if parser is not None else []
     positionals = _collect_positionals(parser) if parser is not None else []
 
@@ -271,7 +285,7 @@ def _render_zsh(tool: _Tool) -> str:
 
 
 def _render_fish(tool: _Tool) -> str:
-    parser = _load_parser(tool.module)
+    parser = _load_parser(tool.module, has_parser=tool.has_parser)
     flags = _collect_flags(parser) if parser is not None else []
     positionals = _collect_positionals(parser) if parser is not None else []
 
@@ -303,13 +317,13 @@ def _render_nu(tool: _Tool) -> str:
     flag name to drive completion; the value is a real string the
     user types or a file path the user picks from a glob.
     """
-    parser = _load_parser(tool.module)
+    parser = _load_parser(tool.module, has_parser=tool.has_parser)
     flags = _collect_flags(parser) if parser is not None else []
 
     if parser is None:
         return (
             f"# {tool.prog}: no completion data yet (build_parser() missing).\n"
-            f"extern \"{tool.prog}\" []\n"
+            f'extern "{tool.prog}" []\n'
         )
 
     lines: list[str] = [

@@ -124,13 +124,13 @@ def test_nu_output_is_external_completer_style() -> None:
     # Each flag is declared as `--<name>: string`.
     assert "--rate: string" in text
     assert "--max-lines: string" in text
-    # The zoom stub still emits an extern declaration so sourcing the
-    # file doesn't break.
+    # paw-zoom has a real build_parser() now, so its nu entry is a real
+    # external completer declaration with all its flags, not a stub.
     assert 'extern "paw-zoom"' in text
 
 
 def test_paw_zoom_renders_a_real_entry() -> None:
-    # paw-zoom now has a real build_parser(), so its completion entry
+    # paw-zoom has a real build_parser(), so its completion entry
     # is generated from the parser — every long flag should appear in
     # at least one of the four shell renderings.
     for shell in _completions.SUPPORTED_SHELLS:
@@ -261,3 +261,90 @@ def _which(name: str) -> str | None:
     top so the rest of the test module stays stdlib-light."""
     import shutil
     return shutil.which(name)
+
+
+# ---------------------------------------------------------------------------
+# has_parser: stub-vs-real semantics
+# ---------------------------------------------------------------------------
+#
+# The _Tool dataclass carries a ``has_parser: bool`` flag. When False the
+# renderer must NOT try to import the module — the tool is a known stub
+# and we want a deterministic no-op completion regardless of what the
+# module happens to expose on the import path. These tests pin down
+# both halves of that contract.
+
+
+def test_load_parser_returns_none_when_has_parser_false(monkeypatch) -> None:
+    """When has_parser=False we must not even import the module — the
+    renderer falls through to the no-op stub branch."""
+
+    def _explode(*args, **kwargs):  # pragma: no cover — guard only
+        raise AssertionError(
+            "import_module was called for a has_parser=False tool"
+        )
+
+    monkeypatch.setattr(_completions.importlib, "import_module", _explode)
+    # Even with a name we know does NOT exist, the call must return None
+    # without raising — the early `if not has_parser: return None` fires
+    # before the import attempt.
+    result = _completions._load_parser(
+        "this.module.does.not.exist.at.all", has_parser=False
+    )
+    assert result is None
+
+
+def test_load_parser_imports_when_has_parser_true(monkeypatch) -> None:
+    """When has_parser=True (the default), the real module is loaded
+    and its build_parser() is consulted."""
+    # Use the real paw-read module — it has a real build_parser().
+    result = _completions._load_parser("whisperpaw.read", has_parser=True)
+    assert result is not None
+    # The return is the actual argparse parser.
+    import argparse
+
+    assert isinstance(result, argparse.ArgumentParser)
+
+
+def test_stub_tool_renders_noop_completion() -> None:
+    """A has_parser=False tool produces a shell-specific no-op stub
+    rather than a real flag list, even if the underlying module happens
+    to have a build_parser() we could discover."""
+    import argparse
+
+    fake_module = type(sys)("fake_stub_module")
+    # Even if the stub module *did* expose a build_parser(), the
+    # has_parser=False path should bypass it entirely.
+    def _build():
+        p = argparse.ArgumentParser(prog="paw-fake")
+        p.add_argument("--would-be-real-flag")
+        return p
+    fake_module.build_parser = _build  # type: ignore[attr-defined]
+    sys.modules["fake_stub_module"] = fake_module
+
+    try:
+        stub_tool = _completions._Tool(
+            "fake_stub_module", "paw-fake", has_parser=False
+        )
+        # Check the bash renderer — the most explicit stub shape.
+        rendered = _completions._render_bash(stub_tool)
+        # The stub mentions the tool name and registers a no-op
+        # complete function, but never lists a real flag.
+        assert "paw-fake" in rendered
+        assert "_paw_fake" in rendered
+        assert "--would-be-real-flag" not in rendered
+    finally:
+        del sys.modules["fake_stub_module"]
+
+
+def test_paw_zoom_no_longer_flagged_as_stub() -> None:
+    """paw-zoom shipped a real build_parser() in the v0.1 tick; the
+    completion registry must reflect that (has_parser=True, the
+    default). This test guards against a future regression where
+    someone re-adds ``has_parser=False`` to the paw-zoom line.
+    """
+    zoom_entries = [t for t in _completions._TOOLS if t.prog == "paw-zoom"]
+    assert len(zoom_entries) == 1
+    assert zoom_entries[0].has_parser is True, (
+        "paw-zoom has a real build_parser(); the registry should not "
+        "mark it as a stub anymore"
+    )
