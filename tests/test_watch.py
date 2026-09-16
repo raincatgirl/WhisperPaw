@@ -568,3 +568,249 @@ def test_spawn_merges_stderr_when_requested() -> None:
     lines = [ln for ln in completed.stdout.splitlines() if ln]
     assert "e" in lines
     assert "o" in lines
+
+
+# --- --dry-run preview mode ----------------------------------------------
+
+
+def test_parse_args_dry_run_flag() -> None:
+    """``--dry-run`` is a boolean flag, default False."""
+    args = watch.parse_args(["--", "echo", "hi"])
+    assert args.dry_run is False
+    args = watch.parse_args(["--dry-run", "--", "echo", "hi"])
+    assert args.dry_run is True
+
+
+def test_parse_args_dry_run_combines_with_other_flags() -> None:
+    """``--dry-run`` plays nicely with ``--max-lines`` and ``--follow``."""
+    args = watch.parse_args(
+        ["--dry-run", "--max-lines", "3", "--follow", "--", "make", "watch"]
+    )
+    assert args.dry_run is True
+    assert args.max_lines == 3
+    assert args.follow is True
+    assert args.cmd == ["make", "watch"]
+
+
+def test_emit_line_speaks_when_not_dry_run() -> None:
+    """In normal mode ``_emit_line`` forwards to ``_speak_line``."""
+    seen: list[str] = []
+    monkey_calls = {"n": 0}
+
+    def fake_speak(line, rate, volume):
+        seen.append(line)
+        monkey_calls["n"] += 1
+        return 0
+
+    saved = watch._speak_line
+    watch._speak_line = fake_speak
+    try:
+        code = watch._emit_line("hi", rate=200.0, volume=1.0, dry_run=False)
+    finally:
+        watch._speak_line = saved
+
+    assert code == 0
+    assert seen == ["hi"]
+    assert monkey_calls["n"] == 1
+
+
+def test_emit_line_prints_in_dry_run(capsys) -> None:
+    """In dry-run mode ``_emit_line`` prints the line and returns 0,
+    without ever touching ``_speak_line``."""
+    spoke = {"called": False}
+
+    def fake_speak(line, rate, volume):
+        spoke["called"] = True
+        return 0
+
+    saved = watch._speak_line
+    watch._speak_line = fake_speak
+    try:
+        code = watch._emit_line("hello world", rate=200.0, volume=1.0, dry_run=True)
+    finally:
+        watch._speak_line = saved
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert out == "hello world\n"
+    assert spoke["called"] is False
+
+
+def test_main_dry_run_prints_lines(monkeypatch, capsys) -> None:
+    """``--dry-run`` prints each complete line to stdout instead of TTS."""
+    spoke = {"called": False}
+
+    def _fake_speak(*a, **kw):
+        spoke["called"] = True
+        return 0
+
+    monkeypatch.setattr(watch, "_speak_line", _fake_speak)
+
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="alpha\nbeta\ngamma\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+
+    code = watch.main(["--quiet", "--dry-run", "--", "echo", "hi"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert out == "alpha\nbeta\ngamma\n"
+    assert spoke["called"] is False
+
+
+def test_main_dry_run_respects_max_lines(monkeypatch, capsys) -> None:
+    """``--dry-run`` honours ``--max-lines`` exactly like the speaking path."""
+    spoke = {"called": False}
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda *a, **kw: spoke.__setitem__("called", True) or 0
+    )
+
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="1\n2\n3\n4\n5\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+
+    code = watch.main(
+        ["--quiet", "--dry-run", "--max-lines", "2", "--", "seq", "5"]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert out == "1\n2\n"
+    assert spoke["called"] is False
+
+
+def test_main_dry_run_mirrors_child_exit_code(monkeypatch, capsys) -> None:
+    """A failing child under ``--dry-run`` still returns the child's code,
+    not 0. We must never mask a real failure just because TTS is off."""
+    spoke = {"called": False}
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda *a, **kw: spoke.__setitem__("called", True) or 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=42, stdout="boom\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+
+    code = watch.main(["--quiet", "--dry-run", "--", "false"])
+    assert code == 42
+    out = capsys.readouterr().out
+    assert out == "boom\n"
+    assert spoke["called"] is False
+
+
+def test_main_dry_run_propagates_spawn_failure(monkeypatch, capsys) -> None:
+    """``--dry-run`` cannot conjure a successful run if the binary is missing."""
+    spoke = {"called": False}
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda *a, **kw: spoke.__setitem__("called", True) or 0
+    )
+
+    def _bad_spawn(*a, **kw):
+        raise FileNotFoundError(2, "no such binary", a[0] if a else None)
+
+    monkeypatch.setattr(watch, "_spawn", _bad_spawn)
+    code = watch.main(
+        ["--quiet", "--dry-run", "--", "definitely-not-a-real-binary-xyz"]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "not found" in err.lower() or "no such" in err.lower()
+    assert spoke["called"] is False
+
+
+def test_main_dry_run_announces_previewing(monkeypatch, capsys) -> None:
+    """The banner in ``--dry-run`` mode says ``previewing``, not ``tailing``/``following``."""
+    monkeypatch.setattr(watch, "_speak_line", lambda *a, **kw: 0)
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="hi\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+
+    code = watch.main(["--dry-run", "--", "echo", "hi"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "🐾" in out
+    assert "previewing" in out
+    # We must not say "tailing" or "following" -- the user is previewing.
+    assert "tailing" not in out
+    assert "following" not in out
+
+
+def test_main_dry_run_works_with_follow(monkeypatch, capsys) -> None:
+    """``--dry-run --follow`` prints streamed lines instead of speaking them."""
+    spoke = {"called": False}
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda *a, **kw: spoke.__setitem__("called", True) or 0
+    )
+
+    class _FakeStream:
+        def stdout_iter(self):
+            for line in ["first\n", "second\n", "third\n"]:
+                yield line
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(watch, "_popen", lambda *a, **kw: _FakeStream())
+    code = watch.main(["--quiet", "--dry-run", "--follow", "--", "tail", "-f", "x.log"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert out == "first\nsecond\nthird\n"
+    assert spoke["called"] is False
+
+
+def test_main_dry_run_empty_stdout_is_ok(monkeypatch, capsys) -> None:
+    """A child that produces no output under ``--dry-run`` prints nothing and exits 0."""
+    spoke = {"called": False}
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda *a, **kw: spoke.__setitem__("called", True) or 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    code = watch.main(["--quiet", "--dry-run", "--", "true"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert out == ""
+    assert spoke["called"] is False
+
+
+def test_main_dry_run_handles_trailing_partial_line(monkeypatch, capsys) -> None:
+    """A final line without a newline should still be flushed & printed in dry-run."""
+    spoke = {"called": False}
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda *a, **kw: spoke.__setitem__("called", True) or 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="with-newline\nno-newline", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    code = watch.main(["--quiet", "--dry-run", "--", "cmd"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert out == "with-newline\nno-newline\n"
+    assert spoke["called"] is False
+
+
+def test_main_dry_run_does_not_call_speak_line_even_with_tts_error(
+    monkeypatch, capsys
+) -> None:
+    """``--dry-run`` must not consult the TTS chain at all -- so a TTS error
+    in the environment cannot bubble up through the dry-run path."""
+    # If _speak_line were ever called under --dry-run, this mock would
+    # return a non-zero code and the test would fail. The point is that
+    # we should never get there.
+    def _would_break(*a, **kw):
+        raise AssertionError(
+            "_speak_line must not be called when --dry-run is set"
+        )
+
+    monkeypatch.setattr(watch, "_speak_line", _would_break)
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="anything\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    code = watch.main(["--quiet", "--dry-run", "--", "echo", "anything"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert out == "anything\n"

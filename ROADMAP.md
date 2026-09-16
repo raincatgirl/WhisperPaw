@@ -108,6 +108,9 @@ Legend: 🐣 planned · 🛠 in progress · ✅ shipped · 🐛 buggy
   `--include-stderr` (merge stderr into the spoken stream),
   `--follow` (stream stdout line-by-line instead of waiting for the
   child to finish — useful for `tail -f`, `make watch`, `npm run dev`),
+  `--dry-run` (print what would be spoken to stdout, one line per
+  line, instead of calling the TTS engine — the watched command still
+  runs, and the child's exit code is still mirrored),
   `--quiet`.
 - Two execution paths:
   - **batch** (default) uses `subprocess.run(..., capture_output=True)`
@@ -207,4 +210,5 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-15 — paw-zoom: ASCII proof-of-concept (data model + viewport math + magnification + source resolver + argparse). 38 new tests, 198/198 green. v0.1 shipped; real screen-capture render lands in a later tick.
 - 2026-09-15 — paw-sound: added --json output mode for the discovery flags + public to_json() helper. 12 new tests, 210/210 green.
 - 2026-09-15 — paw-read: added --list-backends / --list-voices discovery flags + public list_backends() / list_voices() helpers + to_json(); moved _PIPER_AUTO_PATHS up to the discovery section so both paths share one source of truth. 16 new tests, 233/233 green.
+- 2026-09-16 — paw-watch: added --dry-run preview mode (prints each would-be-spoken line to stdout, no TTS chain touched, child's exit code still mirrored). Refactored batch and streaming paths to share a new _emit_line() helper so the dry-run branch lives in one place. 13 new tests, 246/246 green. Regenerated the four static completion files so --dry-run shows up in Tab completion.
 <!-- TICK-LOG-END -->

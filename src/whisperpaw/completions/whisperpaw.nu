@@ -45,6 +45,7 @@ extern "paw-watch" [
     --include-stderr: string  # Also speak lines that arrive on stderr (in addition to stdout).
     --quiet: string  # Suppress the announcement line (still speaks).
     --follow: string  # Stream the output instead of waiting for the command to finish: each new line i…
+    --dry-run: string  # Print each line that *would* be spoken to stdout, one per line, instead of call…
 ]
 
 # Auto-generated external completer for paw-zoom.

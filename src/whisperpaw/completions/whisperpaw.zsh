@@ -49,7 +49,8 @@ _paw_watch() {
     '--max-lines[Speak at most this many lines (0 = unlimited, default: 0).]' \
     '--include-stderr[Also speak lines that arrive on stderr (in addition to stdout).]' \
     '--quiet[Suppress the announcement line (still speaks).]' \
-    '--follow[Stream the output instead of waiting for the command to finish: each new line i…]'
+    '--follow[Stream the output instead of waiting for the command to finish: each new line i…]' \
+    '--dry-run[Print each line that *would* be spoken to stdout, one per line, instead of call…]'
 }
 _paw_watch "$@"
 

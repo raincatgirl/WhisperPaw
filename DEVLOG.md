@@ -569,3 +569,106 @@
   comment in `paw-read`'s macOS / Windows Piper playback path —
   the code actually pipes via stdin), or a fourth sound pack if
   the user asks for one.
+
+---
+
+## 2026-09-16 — paw-watch: `--dry-run` preview mode
+
+**What changed.** Added a new boolean flag to `paw-watch`:
+`--dry-run`. When set, every line that *would* be spoken is instead
+written to stdout (one line per line), the TTS chain is **never
+consulted** (no `say`, no `spd-say`, no `espeak`, no SAPI, no Piper
+aplay pipe), and the watched command's exit code is still mirrored
+back to the caller. The flag composes with `--max-lines`,
+`--include-stderr`, and `--follow`. The default banner line becomes
+`paw-watch: previewing CMD` instead of the mode-specific
+"tailing"/"following" form so the user can see at a glance they're
+in preview mode.
+
+**Why.** Three concrete use cases kept showing up:
+
+1. **Debugging TTS settings** — "what will `--max-lines 3` actually
+   say? what does `--include-stderr` look like merged with stdout?"
+   Answer those questions without sound and without disturbing the
+   office.
+2. **Piping to a pager** — `paw-watch --dry-run -- make test | less`
+   for a screen-reader-free way to skim long output.
+3. **`set -e` composability** — a script that runs `paw-watch
+   --dry-run -- some-test-runner` wants a real exit code from a real
+   failure, not a 0 that masks a broken build. Dry-run is the only
+   way to use `paw-watch` inside automation without it trying to
+   talk.
+
+**How.** Refactored the per-line "speak this" call out of the batch
+and streaming paths into a single new helper, `_emit_line(line,
+*, rate, volume, dry_run)`. In normal mode it forwards to
+`_speak_line`; in dry-run mode it `print()`s and returns 0. The
+batch and streaming code paths now both call `_emit_line` instead
+of `_speak_line` directly, so the dry-run branch is impossible to
+forget on one of them. The exit-code decision at the end of each
+path is unchanged: child's exit code wins, then TTS error, then 0 —
+except in dry-run mode the helper always returns 0, so a failing
+child is the only failure signal (which is what `set -e` scripts
+want).
+
+**Tests.** 13 new tests in `tests/test_watch.py`:
+
+- `test_parse_args_dry_run_flag` — default is False; the flag flips
+  it; the `--` separator still works
+- `test_parse_args_dry_run_combines_with_other_flags` — `--dry-run
+  --max-lines 3 --follow -- make watch` parses with all four attrs
+  set
+- `test_emit_line_speaks_when_not_dry_run` — the helper delegates
+  to `_speak_line` and returns its code
+- `test_emit_line_prints_in_dry_run` — the helper prints the line
+  to stdout, returns 0, and never calls `_speak_line` (verified
+  via a monkey-patched spy)
+- `test_main_dry_run_prints_lines` — end-to-end: `paw-watch
+  --dry-run --quiet -- cmd` prints each stdout line in order
+- `test_main_dry_run_respects_max_lines` — `--max-lines` truncates
+  dry-run output exactly like the speaking path
+- `test_main_dry_run_mirrors_child_exit_code` — a child that
+  exits 42 still makes `paw-watch` exit 42 under dry-run; we never
+  mask a real failure
+- `test_main_dry_run_propagates_spawn_failure` — a missing binary
+  under dry-run is still exit 2; the user knows their command
+  doesn't exist
+- `test_main_dry_run_announces_previewing` — the non-quiet banner
+  says `previewing`, not `tailing` or `following`
+- `test_main_dry_run_works_with_follow` — `--dry-run --follow`
+  prints streamed lines instead of speaking them
+- `test_main_dry_run_empty_stdout_is_ok` — a child with no output
+  under dry-run prints nothing and exits 0
+- `test_main_dry_run_handles_trailing_partial_line` — a final
+  line without `\n` is still flushed & printed (the line-buffer's
+  normal behaviour)
+- `test_main_dry_run_does_not_call_speak_line_even_with_tts_error`
+  — defensive: a `_speak_line` mock that raises
+  `AssertionError` is never called, proving the TTS chain is
+  unreachable from the dry-run path
+
+**Bookkeeping.** Regenerated all four static completion files
+(`whisperpaw.{bash,zsh,fish,nu}`) so `--dry-run` shows up in Tab
+completion. The byte-identity test in `tests/test_completions.py`
+catches the regeneration automatically.
+
+**Total: 246/246 green** (13 new + 233 existing). Pure stdlib. No
+new third-party deps. No telemetry. No network.
+
+**Next tick.** The natural follow-ups, in rough order of value:
+
+- **`paw-zoom` v0.2** — real screen-capture render. The data
+  model and viewport math are already there from the v0.1 POC;
+  the next tick plugs a per-OS adapter (Linux / macOS / Windows)
+  in front of `render_viewport` without changing the math or
+  the CLI.
+- **Misleading comment fix in `paw-read`** — line 567 of
+  `read.py` says "we route through a temp file" for the
+  macOS/Windows Piper playback path, but the code actually
+  pipes via stdin (the `_pump` thread in `_piper_speak`). One-
+  line comment fix; worth bundling with whatever the next
+  non-zoom tick turns out to be.
+- **Paw-zoom static completion** — the `_completions` module
+  still lists `paw-zoom` as `has_parser=False` even though it
+  now has a real parser. One-line fix; should ride along with
+  the next real paw-zoom tick.

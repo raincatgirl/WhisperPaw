@@ -7,6 +7,7 @@ Usage::
     paw-watch --max-lines 5 -- seq 10
     paw-watch --follow -- tail -f /var/log/syslog
     paw-watch --follow --make watch
+    paw-watch --dry-run -- pytest -q   # print what would be spoken, no sound
 
 Design
 ------
@@ -114,6 +115,18 @@ def build_parser() -> argparse.ArgumentParser:
             "Stream the output instead of waiting for the command to finish: "
             "each new line is spoken as it arrives, then the exit code is "
             "mirrored. Useful for `tail -f`, `make watch`, `npm run dev`, etc."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Print each line that *would* be spoken to stdout, one per "
+            "line, instead of calling the TTS engine. The watched "
+            "command still runs. Useful for previewing output, piping "
+            "to a pager, or debugging --max-lines / --include-stderr "
+            "settings without sound. Exits with the child's exit code "
+            "(never a TTS error) so it composes with `set -e` scripts."
         ),
     )
     return parser
@@ -297,6 +310,25 @@ def _speak_line(line: str, rate: float, volume: float) -> int:
     return last
 
 
+def _emit_line(
+    line: str,
+    *,
+    rate: float,
+    volume: float,
+    dry_run: bool,
+) -> int:
+    """Speak ``line`` (or print it in dry-run mode) and return the TTS code.
+
+    Centralises the "speak vs. print" branch so the batch and streaming
+    paths stay symmetric. In dry-run mode the line goes to stdout and we
+    return 0 — the dry-run path never reports a TTS error.
+    """
+    if dry_run:
+        print(line)
+        return 0
+    return _speak_line(line, rate, volume)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -313,7 +345,8 @@ def main(argv: list[str] | None = None) -> int:
         preview = " ".join(args.cmd)
         if len(preview) > 60:
             preview = preview[:57] + "..."
-        print(f"🐾 paw-watch: {mode}ing `{preview}`")
+        action = "previewing" if args.dry_run else f"{mode}ing"
+        print(f"🐾 paw-watch: {action} `{preview}`")
 
     if args.follow:
         return _run_streaming(args)
@@ -339,7 +372,12 @@ def main(argv: list[str] | None = None) -> int:
     for line in buffer.feed(completed.stdout or ""):
         if max_lines and spoken >= max_lines:
             break
-        code = _speak_line(line, args.rate, args.volume)
+        code = _emit_line(
+            line,
+            rate=args.rate,
+            volume=args.volume,
+            dry_run=args.dry_run,
+        )
         spoken += 1
         if code != 0:
             tts_error = code
@@ -347,13 +385,20 @@ def main(argv: list[str] | None = None) -> int:
     for line in buffer.flush():
         if max_lines and spoken >= max_lines:
             break
-        code = _speak_line(line, args.rate, args.volume)
+        code = _emit_line(
+            line,
+            rate=args.rate,
+            volume=args.volume,
+            dry_run=args.dry_run,
+        )
         spoken += 1
         if code != 0:
             tts_error = code
 
-    # Mirror the child's exit code if it failed. Otherwise prefer the
-    # TTS error if there was one (more useful for debugging audio).
+    # Mirror the child's exit code if it failed. Dry-run never reports
+    # a TTS error (the helper always returns 0 in that mode), so a
+    # failed child is the only failure signal -- which is what `set -e`
+    # scripts want.
     if completed.returncode != 0:
         return completed.returncode
     if tts_error:
@@ -395,7 +440,12 @@ def _run_streaming(args: argparse.Namespace) -> int:
             for line in buffer.feed(raw_line):
                 if max_lines and spoken >= max_lines:
                     break
-                code = _speak_line(line, args.rate, args.volume)
+                code = _emit_line(
+                    line,
+                    rate=args.rate,
+                    volume=args.volume,
+                    dry_run=args.dry_run,
+                )
                 spoken += 1
                 if code != 0:
                     tts_error = code
@@ -408,7 +458,12 @@ def _run_streaming(args: argparse.Namespace) -> int:
         for line in buffer.flush():
             if max_lines and spoken >= max_lines:
                 break
-            code = _speak_line(line, args.rate, args.volume)
+            code = _emit_line(
+                line,
+                rate=args.rate,
+                volume=args.volume,
+                dry_run=args.dry_run,
+            )
             spoken += 1
             if code != 0:
                 tts_error = code
