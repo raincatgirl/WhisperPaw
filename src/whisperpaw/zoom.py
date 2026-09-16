@@ -327,6 +327,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Suppress the announcement line (still renders).",
     )
+    parser.add_argument(
+        "--snapshot",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Write the rendered viewport to PATH instead of stdout. "
+            "The file is created or overwritten. Useful for piping "
+            "rendering into scripts, logs, or later processing. The "
+            "announcement line (unless --quiet) still goes to stderr."
+        ),
+    )
     return parser
 
 
@@ -405,7 +416,22 @@ def main(argv: list[str] | None = None) -> int:
         # we re-validate at the boundary.
         print(f"paw-zoom: {exc}", file=sys.stderr)
         return 2
-    print(rendered)
+    if args.snapshot is not None:
+        try:
+            # Create or overwrite. Text mode preserves the codepoint
+            # layout of the rendered viewport, which is what callers
+            # expect when they later diff or print the file.
+            with open(args.snapshot, "w", encoding="utf-8") as fh:
+                fh.write(rendered)
+        except OSError as exc:
+            print(
+                f"paw-zoom: could not write --snapshot file "
+                f"{args.snapshot!r}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        print(rendered)
     return 0
 
 

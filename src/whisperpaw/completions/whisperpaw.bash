@@ -55,13 +55,13 @@ _paw_complete_paw_watch() {
 complete -F _paw_complete_paw_watch paw-watch
 
 _paw_zoom_flags() {
-  COMPREPLY=(--file --rows --cols --offset --col-offset --zoom --charset --quiet)
+  COMPREPLY=(--file --rows --cols --offset --col-offset --zoom --charset --quiet --snapshot)
 }
 _paw_complete_paw_zoom() {
   local cur prev
   cur="${COMP_WORDS[COMP_CWORD]}"
   if [[ "$cur" == --* ]]; then
-    COMPREPLY=($(compgen -W '--file --rows --cols --offset --col-offset --zoom --charset --quiet' -- "$cur"))
+    COMPREPLY=($(compgen -W '--file --rows --cols --offset --col-offset --zoom --charset --quiet --snapshot' -- "$cur"))
     return 0
   fi
   # No subcommands; nothing else to complete.

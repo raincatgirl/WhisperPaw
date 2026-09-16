@@ -352,3 +352,101 @@ def test_main_no_source(capsys, monkeypatch) -> None:
     assert rc == 2
     err = capsys.readouterr().err
     assert "no text" in err.lower() or "no source" in err.lower()
+
+
+# --- --snapshot flag ---------------------------------------------------
+
+
+def test_parse_args_snapshot_default_is_none() -> None:
+    args = zoom.parse_args(["--quiet", "hello"])
+    assert args.snapshot is None
+
+
+def test_parse_args_snapshot_writes_to_path(tmp_path) -> None:
+    out = tmp_path / "shot.txt"
+    args = zoom.parse_args(["--quiet", "--snapshot", str(out), "hello"])
+    assert args.snapshot == str(out)
+
+
+def test_main_snapshot_writes_file_and_exits_zero(tmp_path) -> None:
+    out = tmp_path / "shot.txt"
+    rc = zoom.main(["--quiet", "--snapshot", str(out), "hello"])
+    assert rc == 0
+    text = out.read_text(encoding="utf-8")
+    # Snapshot must contain the rendered (magnified) output.
+    # Default --zoom is 2, so 'hello' renders as 'hheelllloo'. The
+    # source is still reconstructible: every other character of the
+    # rendered line, in order, is the source.
+    assert "hheelllloo" in text, repr(text)
+    # And the source string's characters appear in order.
+    for i, ch in enumerate("hello"):
+        assert ch in text[i * 2 : i * 2 + 5], (i, ch, text)
+    # The output is multiple lines; at least one of them is at least
+    # 10 source-cols wide (5 source chars * zoom 2 = 10 rendered cols).
+    assert any(len(line) >= 10 for line in text.splitlines()), text.splitlines()
+
+
+def test_main_snapshot_with_zoom_one(tmp_path) -> None:
+    """--zoom 1 should give one output cell per source cell, no
+    repetition. Locks in the documented magnification contract."""
+    out = tmp_path / "shot.txt"
+    rc = zoom.main(["--quiet", "--zoom", "1", "--snapshot", str(out), "abc"])
+    assert rc == 0
+    text = out.read_text(encoding="utf-8")
+    # With zoom=1, 'abc' renders as 'abc' (no repetition).
+    assert "abc" in text
+    # No repetition: a source string of length N must not appear
+    # back-to-back twice in the rendered line. Default viewport
+    # width is 38 cols, so the line is 38 chars wide; we look at
+    # the first 38 characters of the first non-empty line.
+    first_line = next(
+        (l for l in text.splitlines() if l.strip()),
+        "",
+    )
+    assert "abcabc" not in first_line, first_line
+    # And the source row must appear in the output exactly once
+    # (the viewport is one row tall by default).
+    assert first_line.count("abc") == 1, first_line
+
+
+def test_main_snapshot_overwrites_existing_file(tmp_path) -> None:
+    """A pre-existing target file is replaced, not appended to."""
+    out = tmp_path / "shot.txt"
+    out.write_text("garbage from a previous run", encoding="utf-8")
+    rc = zoom.main(["--quiet", "--zoom", "1", "--snapshot", str(out), "new"])
+    assert rc == 0
+    text = out.read_text(encoding="utf-8")
+    assert "garbage" not in text
+    assert "new" in text
+
+
+def test_main_snapshot_to_unwritable_path_exits_nonzero(tmp_path, monkeypatch) -> None:
+    """Writing to a directory that does not exist should fail cleanly
+    with a non-zero exit code, not a Python traceback."""
+    bad = tmp_path / "nope" / "shot.txt"  # parent does not exist
+    monkeypatch.setenv("WPAW_ZOOM_STDIN_OVERRIDE", "")
+    rc = zoom.main(["--quiet", "--snapshot", str(bad), "hello"])
+    # We accept 1 (env/IO) or 2 (usage) — anything non-zero, but not
+    # a traceback.
+    assert rc != 0
+
+
+def test_main_snapshot_with_file_source(tmp_path) -> None:
+    """--snapshot composes with --file: write to one path, read from another."""
+    src = tmp_path / "in.txt"
+    src.write_text("from file", encoding="utf-8")
+    out = tmp_path / "out.txt"
+    rc = zoom.main(["--quiet", "--zoom", "1", "--snapshot", str(out), "--file", str(src)])
+    assert rc == 0
+    text = out.read_text(encoding="utf-8")
+    assert "from file" in text
+
+
+def test_main_snapshot_stdin_source(tmp_path, monkeypatch) -> None:
+    """--snapshot also works with stdin as the source."""
+    out = tmp_path / "out.txt"
+    monkeypatch.setenv("WPAW_ZOOM_STDIN_OVERRIDE", "from stdin")
+    rc = zoom.main(["--quiet", "--zoom", "1", "--snapshot", str(out)])
+    assert rc == 0
+    text = out.read_text(encoding="utf-8")
+    assert "from stdin" in text

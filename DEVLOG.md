@@ -776,3 +776,27 @@ next-step candidates are:
   tick. Only worth doing if the user wants it, though —
   the three ambient moods already cover the major
   accessibility needs.
+
+
+## 2026-09-16 — `paw-zoom` v0.1.x: add `--snapshot PATH`
+
+- Added `--snapshot PATH` flag. When set, the rendered viewport
+  is written to PATH (created or overwritten) instead of being
+  printed to stdout. The announcement line (unless `--quiet`)
+  still goes to stderr, so scripts can capture the snapshot
+  cleanly via the filesystem.
+- Why: the existing stdout path forced callers to choose
+  between "show the viewport" and "pipe it somewhere". With
+  `--snapshot`, a CI step can `paw-zoom --snapshot out.txt …`
+  and the snapshot file is a discrete artifact (good for diffs,
+  archival, or downstream `cat`/inspection).
+- 8 new tests in `tests/test_zoom.py` cover the argparse flag,
+  the file write, overwrite-existing semantics, error
+  handling for unwritable paths, and the interaction with
+  `--file` and stdin. The shipped static completion files
+  under `src/whisperpaw/completions/` were regenerated so the
+  new flag shows up in Tab completion for all four shells
+  (the byte-identity test caught the drift automatically).
+- Total: **263/263 tests green** (8 new + 255 existing).
+- v0.2 (real screen-capture render, Linux/macOS first) is the
+  next meaningful tick. This change does not interfere.

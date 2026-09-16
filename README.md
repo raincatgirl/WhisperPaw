@@ -21,7 +21,7 @@ WhisperPaw is a small collection of command-line tools that make the terminal ki
 | `paw-read` | Reads text aloud via TTS. Accepts a positional arg, `--file`, `--clipboard`, or stdin. Backends: macOS `say` / Linux `spd-say`/`espeak` / Windows SAPI, plus optional **Piper** for high-quality local neural voices. Ships `--list-backends` / `--list-voices` + `--json` discovery flags. | ✅ shipped |
 | `paw-watch` | Runs a command and speaks each line of its output. Two modes: default *batch* (wait for the child, then speak), or `--follow` for long-running watchers (`tail -f`, `make watch`). Supports `--max-lines`, `--include-stderr`. Reuses `paw-read`'s TTS chain. | ✅ shipped |
 | `paw-complete` | Prints shell-completion code (bash / zsh / fish / nushell) for every shipped `paw-*` tool, derived live from each tool's argparse parser. | ✅ shipped |
-| `paw-zoom` | Magnifies a rectangular region of text (v0.1 ASCII proof-of-concept; real screen-capture render lands in a later tick). Pure stdlib. | ✅ shipped (v0.1) |
+| `paw-zoom` | ASCII magnifier: render a `rows×cols` region of text source, with each cell repeated `zoom×zoom`. v0.1 covers data model + math + magnification + `--snapshot PATH` for file output. Pure stdlib. | ✅ shipped (v0.1) |
 
 ## 🚀 Install
 
@@ -66,6 +66,12 @@ paw-sound --list-packs     # cat / forest / rain
 paw-sound --list-events    # ok / warn / fail / ready / ding
 paw-sound --list-packs --json   # → {"packs": ["cat", "forest", "rain"]} (for jq / scripts)
 
+# Magnify a region of text and write the result to a file
+paw-zoom --quiet --zoom 1 --snapshot /tmp/shot.txt "hello world"
+
+# Pipe-friendly: --quiet suppresses the announcement line so stdout
+# stays clean for downstream tools (the rendered viewport goes to
+# the snapshot file, never stdout, when --snapshot is set)
 # Tail a long build and hear each new line as it appears
 paw-watch --max-lines 20 -- make
 
@@ -111,7 +117,7 @@ paw-zoom --rows 10 --cols 40 --charset dot "short"
 - [x] `paw-read` — optional Piper backend (high-quality neural voice)
 - [x] `paw-watch` — tail-and-read (reuses paw-read)
 - [x] Shell completions (bash / zsh / fish / nushell) — `paw-complete`
-- [x] `paw-zoom` — v0.1 ASCII proof-of-concept (data model + viewport math + magnification)
+- [x] `paw-zoom` — v0.1 ASCII proof-of-concept (data model + viewport math + magnification + `--snapshot PATH`)
 - [x] `paw-sound` discovery flags (`--list-packs` / `--list-events`) + `--json` output
 - [x] `paw-read` discovery flags (`--list-backends` / `--list-voices`) + `--json` output
 - [ ] `paw-zoom` v0.2 — real screen-capture render (Linux/macOS first)

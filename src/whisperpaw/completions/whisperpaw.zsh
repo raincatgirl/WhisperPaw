@@ -65,6 +65,7 @@ _paw_zoom() {
     '--col-offset[Starting column in the source (default: 0).]' \
     '--zoom[Magnification factor: each source cell becomes a --zoom×--zoom block (default:…]' \
     '--charset[Fill character for empty cells: ''space'' (default, invisible), ''hash'' (#), or ''d…]' \
-    '--quiet[Suppress the announcement line (still renders).]'
+    '--quiet[Suppress the announcement line (still renders).]' \
+    '--snapshot[Write the rendered viewport to PATH instead of stdout.]'
 }
 _paw_zoom "$@"

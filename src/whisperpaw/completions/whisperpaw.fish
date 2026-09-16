@@ -48,3 +48,4 @@ complete -c paw-zoom -l col-offset -d 'Starting column in the source (default: 0
 complete -c paw-zoom -l zoom -d 'Magnification factor: each source cell becomes a --zoom×--zoom block (default:…'
 complete -c paw-zoom -l charset -d 'Fill character for empty cells: \'space\' (default, invisible), \'hash\' (#), or \'d…'
 complete -c paw-zoom -l quiet -d 'Suppress the announcement line (still renders).'
+complete -c paw-zoom -l snapshot -d 'Write the rendered viewport to PATH instead of stdout.'
