@@ -62,4 +62,5 @@ extern "paw-zoom" [
     --snapshot: string  # Write the rendered viewport to PATH instead of stdout.
     --live: string  # Follow --file PATH like 'tail -f': re-render the magnified viewport every time…
     --interval: string  # Poll interval in seconds for --live (default: 0.25, must be > 0).
+    --follow: string  # Track the tail of --file PATH (like 'tail -f') instead of showing the start.
 ]

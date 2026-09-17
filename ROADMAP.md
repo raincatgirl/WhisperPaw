@@ -184,10 +184,21 @@ so the math and the CLI don't need to change.
 
 CLI: ``paw-zoom [TEXT] [--file PATH] [--rows N] [--cols N]
 [--offset N] [--col-offset N] [--zoom 1..32]
-[--charset space|hash|dot] [--quiet]``.
+[--charset space|hash|dot] [--quiet] [--snapshot PATH]
+[--live] [--interval SECS] [--follow]``.
 
 Exit codes: 0 ok, 1 ``--file`` not found, 2 usage / no source /
 invalid args.
+
+``--follow`` is a *row-offset modifier*: it makes the viewport show
+the last ``--rows`` lines of the source (like ``tail -n N``) instead
+of the first ``--rows`` lines. Composes with ``--live`` (so the
+magnifier tracks new lines as they arrive — the natural use case
+for log magnifiers) and ``--snapshot`` (each frame overwrites the
+file). Without ``--live`` it is a one-shot render-and-exit, useful
+for piping a file's tail through a magnifier. The derivation lives
+in :func:`whisperpaw.zoom._tail_offset` so the math is testable
+without touching the loop.
 
 ---
 
@@ -214,4 +225,5 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-16 — docs/cleanup: fixed misleading "we route through a temp file" comments on the Darwin/Windows branches of paw-read._pcm_playback_cmd (the code actually pipes PCM into the player's stdin via the _pump thread in _piper_speak), and made the has_parser flag in _completions actually mean something (now short-circuits the import + emits a no-op stub for stub tools; paw-zoom flipped to the default has_parser=True since it now has a real build_parser). 9 new tests, 255/255 green. No static completion files needed regenerating — the four shipped files are still byte-identical to the live renderer output.
 - 2026-09-16 — paw-zoom: add --snapshot PATH flag (render viewport to file). 8 new tests, 263/263 green.
 - 2026-09-16 — paw-zoom: add --live / --interval flags. --live re-renders the magnified viewport every time --file PATH changes (mtime-tracked, change-detected), with --interval SECS controlling the poll cadence. Composes with --snapshot (each frame rewrites the file). 12 new tests, 275/275 green.
+- 2026-09-17 — paw-zoom: add --follow flag. --follow is a row-offset modifier that makes the viewport show the last --rows lines of the source (like `tail -n N`) instead of the first --rows. Composes with --live (so the magnifier tracks new lines as they arrive — the natural use case for log magnifiers) and --snapshot. 13 new tests, 288/288 green. Static completion files regenerated.
 <!-- TICK-LOG-END -->

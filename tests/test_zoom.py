@@ -682,3 +682,196 @@ def test_main_live_writes_to_snapshot_on_change(tmp_path) -> None:
     final = out.read_text(encoding="utf-8")
     assert "beta" in final
     assert "alpha" in final
+
+
+# ---------------------------------------------------------------------------
+# --follow (track the tail of the file)
+# ---------------------------------------------------------------------------
+
+
+def test_tail_offset_shows_whole_file_when_short() -> None:
+    """If the source has <= rows lines, _tail_offset returns 0 —
+    we show the whole thing."""
+    assert zoom._tail_offset("a\nb\nc\n", rows=10) == 0
+
+
+def test_tail_offset_returns_skipped_rows_when_long() -> None:
+    """For a source longer than ``rows`` lines, _tail_offset returns
+    the count of leading lines to skip so the last ``rows`` are in
+    view. A 5-line source viewed at rows=2 skips 3."""
+    assert zoom._tail_offset("a\nb\nc\nd\ne\n", rows=2) == 3
+
+
+def test_tail_offset_drops_trailing_empty_line() -> None:
+    """A file ending in ``\\n`` shouldn't push the last real line
+    off the viewport. Source 'a\\nb\\n' is 2 lines, viewed at
+    rows=2 — no skipping, return 0."""
+    assert zoom._tail_offset("a\nb\n", rows=2) == 0
+
+
+def test_tail_offset_empty_source_returns_zero() -> None:
+    """An empty / whitespace-only source returns 0 so the caller
+    still emits a visible (blank) window."""
+    assert zoom._tail_offset("", rows=5) == 0
+    assert zoom._tail_offset("   \n\n", rows=5) == 0
+
+
+def test_tail_offset_exact_boundary() -> None:
+    """A source with exactly ``rows`` lines returns 0 (no
+    skipping, the last real line is the last one in view)."""
+    assert zoom._tail_offset("a\nb\nc\n", rows=3) == 0
+
+
+def test_tail_and_render_follow_keeps_tail_in_view(tmp_path) -> None:
+    """With ``follow=True``, the rendered viewport always shows the
+    last ``cfg.rows`` lines of the source. We append a new line and
+    verify the *previous* tail line scrolls out of view while the
+    new one is visible."""
+    src = tmp_path / "log.txt"
+    src.write_text("L1\nL2\nL3\nL4\nL5\n", encoding="utf-8")
+    cfg = zoom.ZoomConfig(rows=2, cols=8, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        if ticks["n"] == 2:
+            with open(src, "a", encoding="utf-8") as fh:
+                fh.write("L6\n")
+        return ticks["n"] >= 3
+
+    zoom._tail_and_render(
+        str(src),
+        cfg,
+        interval=0.0,
+        follow=True,
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        sink=frames.append,
+    )
+    assert len(frames) == 2
+    # First frame shows the last 2 lines of the initial 5-line file.
+    assert "L4" in frames[0]
+    assert "L5" in frames[0]
+    assert "L1" not in frames[0]
+    # Second frame shows the last 2 lines after the append.
+    assert "L5" in frames[1]
+    assert "L6" in frames[1]
+    assert "L1" not in frames[1]
+    assert "L4" not in frames[1]
+
+
+def test_tail_and_render_follow_keeps_first_line_visible_when_short(
+    tmp_path,
+) -> None:
+    """With ``follow=True`` and a source shorter than ``rows``,
+    the viewport still shows the whole file (no skipping)."""
+    src = tmp_path / "log.txt"
+    src.write_text("only one\n", encoding="utf-8")
+    cfg = zoom.ZoomConfig(rows=5, cols=10, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        return ticks["n"] >= 2  # one frame, then bail
+
+    zoom._tail_and_render(
+        str(src),
+        cfg,
+        interval=0.0,
+        follow=True,
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        sink=frames.append,
+    )
+    assert len(frames) == 1
+    assert "only one" in frames[0]
+
+
+def test_tail_and_render_without_follow_shows_head(tmp_path) -> None:
+    """Default (``follow=False``) behaviour: the viewport shows
+    the FIRST ``rows`` lines of the source, not the tail. This is
+    a regression guard for the default mode — ``--follow`` must
+    not become the default."""
+    src = tmp_path / "log.txt"
+    src.write_text("L1\nL2\nL3\nL4\nL5\n", encoding="utf-8")
+    cfg = zoom.ZoomConfig(rows=2, cols=8, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        return ticks["n"] >= 2
+
+    zoom._tail_and_render(
+        str(src),
+        cfg,
+        interval=0.0,
+        follow=False,
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        sink=frames.append,
+    )
+    assert len(frames) == 1
+    # Head, not tail.
+    assert "L1" in frames[0]
+    assert "L2" in frames[0]
+    assert "L5" not in frames[0]
+
+
+def test_parse_args_follow_flag() -> None:
+    """``--follow`` parses as a boolean attribute (default False)."""
+    args = zoom.parse_args(["--follow", "hello"])
+    assert args.follow is True
+
+
+def test_parse_args_follow_default_off() -> None:
+    """Without --follow, the attribute is False (the default)."""
+    args = zoom.parse_args(["hello"])
+    assert args.follow is False
+
+
+def test_follow_help_text_mentions_flag() -> None:
+    """The --help text must mention --follow so the tool is
+    discoverable and accidental renames are caught."""
+    parser = zoom.build_parser()
+    help_text = parser.format_help()
+    assert "--follow" in help_text
+
+
+def test_main_follow_renders_tail_to_stdout(tmp_path, capsys) -> None:
+    """End-to-end: ``paw-zoom --follow --file PATH --rows N`` prints
+    a viewport that contains the last N lines of the file (and
+    not the first N lines)."""
+    src = tmp_path / "log.txt"
+    src.write_text("L1\nL2\nL3\nL4\nL5\n", encoding="utf-8")
+    rc = zoom.main(
+        ["--follow", "--file", str(src), "--rows", "2", "--cols", "8",
+         "--zoom", "1", "--quiet"]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The tail of the file is in the rendered output.
+    assert "L4" in out
+    assert "L5" in out
+    # The head is NOT in the rendered output (because the viewport
+    # only has 2 rows and the tail is in view, not the head).
+    assert "L1" not in out
+
+
+def test_main_follow_combines_with_snapshot(tmp_path) -> None:
+    """``--follow --snapshot PATH`` writes the tail-tracked viewport
+    to the snapshot file (overwriting on each call)."""
+    src = tmp_path / "log.txt"
+    src.write_text("alpha\nbeta\ngamma\ndelta\n", encoding="utf-8")
+    out = tmp_path / "shot.txt"
+    rc = zoom.main(
+        ["--follow", "--file", str(src), "--rows", "2", "--cols", "8",
+         "--zoom", "1", "--snapshot", str(out), "--quiet"]
+    )
+    assert rc == 0
+    text = out.read_text(encoding="utf-8")
+    assert "gamma" in text
+    assert "delta" in text
+    assert "alpha" not in text

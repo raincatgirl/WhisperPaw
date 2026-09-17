@@ -31,6 +31,7 @@ Pure stdlib, no third-party deps, no telemetry, no network.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
 import sys
 import time
@@ -245,7 +246,7 @@ def render_viewport(source: str, cfg: ZoomConfig) -> str:
 
 # ---------------------------------------------------------------------------
 # Live / "follow" mode
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 
 
 #: Default poll interval for ``--live`` (seconds). Small enough that
@@ -266,11 +267,36 @@ def _read_file_text(path: str) -> str:
         return fh.read()
 
 
+def _tail_offset(source: str, rows: int) -> int:
+    """Return the row offset that puts the last ``rows`` lines in view.
+
+    Mirrors what ``tail -n N`` shows: for a source with more than
+    ``rows`` logical lines, the offset is ``total - rows``; for a
+    shorter source, the offset is ``0`` (we show the whole thing —
+    the renderer pads with ``fill``).
+
+    Trailing empty lines are dropped before counting, so a file
+    ending in ``\\n`` doesn't push the last real line off the
+    viewport. Empty / whitespace-only source returns ``0`` so the
+    caller still emits a visible (blank) window.
+    """
+    if not source.strip():
+        return 0
+    lines = source.split("\n")
+    if lines and lines[-1] == "" and source.endswith("\n"):
+        lines = lines[:-1]
+    total = len(lines)
+    if total <= rows:
+        return 0
+    return total - rows
+
+
 def _tail_and_render(
     path: str,
     cfg: ZoomConfig,
     *,
     interval: float,
+    follow: bool = False,
     stop_predicate=None,
     clock=None,
     sink=None,
@@ -289,6 +315,14 @@ def _tail_and_render(
     3. Sleep ``interval`` seconds using ``clock()`` (defaults to
        :func:`time.sleep`; tests can pass a fake clock that returns
        immediately).
+
+    When ``follow`` is true, each frame's ``row_offset`` is recomputed
+    so the *last* ``cfg.rows`` lines of the source are in view
+    (``tail -f`` semantics) instead of the first ``cfg.rows`` lines.
+    The config itself is left untouched; the per-frame offset is a
+    derived value that lives only inside this function. Useful for
+    log magnifiers: a 5-row viewport on a 1000-line log file
+    follows the latest lines as they arrive.
 
     Returns ``0`` on a clean exit. Errors are surfaced as a single
     stderr line and the loop continues — a transient ENOENT during
@@ -331,7 +365,16 @@ def _tail_and_render(
             continue
         last_text = text
         last_mtime = mtime
-        rendered = render_viewport(text, cfg)
+        # In --follow mode the row_offset is derived from the source's
+        # current size on every frame, so the viewport tracks the
+        # tail of the file as it grows. We rebuild a per-frame cfg
+        # instead of mutating the caller's (frozen) config.
+        frame_cfg = cfg
+        if follow:
+            frame_cfg = dataclasses.replace(
+                cfg, row_offset=_tail_offset(text, cfg.rows)
+            )
+        rendered = render_viewport(text, frame_cfg)
         if sink is not None:
             sink(rendered)
         else:
@@ -460,6 +503,19 @@ def build_parser() -> argparse.ArgumentParser:
             f"{DEFAULT_LIVE_INTERVAL:g}, must be > 0)."
         ),
     )
+    parser.add_argument(
+        "--follow",
+        action="store_true",
+        help=(
+            "Track the tail of --file PATH (like 'tail -f') instead of "
+            "showing the start. Each rendered frame shows the last "
+            "--rows lines of the source. Composes with --live (so the "
+            "magnifier follows new lines as they arrive) and --snapshot. "
+            "Without --live, --follow renders the tail exactly once and "
+            "exits (equivalent to piping the file through 'tail -n N' "
+            "before magnifying)."
+        ),
+    )
     return parser
 
 
@@ -535,6 +591,13 @@ def main(argv: list[str] | None = None) -> int:
         row_offset=args.offset,
         col_offset=args.col_offset,
     )
+    if args.follow:
+        # --follow is a row_offset modifier: re-derive it from the
+        # source's current size so the last ``cfg.rows`` lines are
+        # in view. We need a source for that, so the resolver has
+        # already run above. If the source is empty, _tail_offset
+        # returns 0 and we fall back to the default offset.
+        cfg = dataclasses.replace(cfg, row_offset=_tail_offset(source, cfg.rows))
     if not args.quiet:
         # A short, friendly banner. We deliberately do not show the
         # full text — it could be huge. The output itself is the
@@ -571,7 +634,11 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             return _tail_and_render(
-                args.file, cfg, interval=args.interval, sink=_sink
+                args.file,
+                cfg,
+                interval=args.interval,
+                follow=args.follow,
+                sink=_sink,
             )
         except KeyboardInterrupt:
             # Ctrl-C is a clean exit in --live mode. Don't print

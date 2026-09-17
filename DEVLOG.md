@@ -868,3 +868,76 @@ next-step candidates are:
   or the CLI. Likely still two ticks: (a) adapter skeleton
   + a Linux Wayland/X11 adapter, (b) the macOS /
   Windows adapters.
+
+## 2026-09-17 — `paw-zoom` grows `--follow` (tail-tracking)
+
+**What changed.** Added a new boolean flag to `paw-zoom`:
+`--follow`. When set, the rendered viewport shows the **last**
+`--rows` lines of the source (like `tail -n N`) instead of the
+**first** `--rows` lines. Composes with `--live` (so the
+magnifier tracks new lines as they arrive — the natural use case
+for log magnifiers) and `--snapshot` (each frame overwrites the
+file). Without `--live` it is a one-shot render-and-exit,
+equivalent to piping the file through `tail -n N` before
+magnifying.
+
+**Why now.** `--live` from the previous tick re-renders the
+viewport on every source change — but it always showed the
+*head* of the file. For a 1000-line log, that's a viewport stuck
+on lines 1–10, which is exactly the wrong thing to magnify. A
+log magnifier should follow the *tail* of the file, the way
+`tail -f` already does. `--follow` is the row-offset modifier
+that makes that work; the existing `--live` loop shape is
+unchanged.
+
+**How.** Added a new pure helper, `_tail_offset(source, rows)`,
+that returns the row offset needed to put the last `rows` lines
+in view. It handles the four edge cases that matter:
+
+* empty / whitespace-only source → 0 (we show the blank window)
+* trailing-newline trimming (so a file ending in `\n` doesn't
+  push its last real line off the viewport)
+* source shorter than `rows` → 0 (no skipping, show the whole
+  thing)
+* source longer than `rows` → `total - rows` (skip the leading
+  lines)
+
+The helper is called per-frame inside `_tail_and_render` when
+`follow=True`, and called once in `main()` for the one-shot path.
+The frozen `ZoomConfig` is rebuilt via `dataclasses.replace` so
+the caller's config is never mutated.
+
+**Tests.** 13 new tests in `tests/test_zoom.py`:
+
+* `_tail_offset` math: short source, long source, exact boundary,
+  trailing-newline trimming, empty source
+* `_tail_and_render` with `follow=True` keeps the tail in view
+  after an append — the previous tail line scrolls out, the new
+  line is in view
+* `_tail_and_render` with `follow=True` on a short source still
+  shows the whole file (no skipping)
+* `_tail_and_render` with `follow=False` is unchanged — a
+  regression guard so the default doesn't silently flip
+* argparse: `--follow` parses, default is off, the help text
+  mentions the flag (catches accidental renames)
+* end-to-end: `paw-zoom --follow --file PATH --rows N` prints
+  the last N lines to stdout, never the first N
+* end-to-end: `--follow --snapshot PATH` writes the tail to the
+  file (overwriting)
+
+Also regenerated all four static shell-completion files
+(`completions/whisperpaw.{bash,zsh,fish,nu}`) so `--follow` shows
+up in Tab completion for every shell. The byte-identity test in
+`tests/test_completions.py` caught the drift and forced the
+regen.
+
+**Total: 288/288 green** (13 new + 275 existing). Pure stdlib,
+no new deps, no telemetry, no network.
+
+**Next tick.** `paw-zoom` v0.2 — the real screen-capture render.
+The `--live` + `--follow` loop is now proven on a text source,
+and the per-frame `ZoomConfig` rebuild pattern is established,
+so v0.2 can plug a per-OS capture adapter (Wayland / X11 /
+Win32 GDI) in front of `_tail_and_render` without changing the
+math or the CLI. Likely still two ticks: (a) adapter skeleton
++ a Linux X11 adapter, (b) the macOS / Windows adapters.
