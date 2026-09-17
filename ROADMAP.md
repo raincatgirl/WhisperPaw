@@ -185,7 +185,7 @@ so the math and the CLI don't need to change.
 CLI: ``paw-zoom [TEXT] [--file PATH] [--rows N] [--cols N]
 [--offset N] [--col-offset N] [--zoom 1..32]
 [--charset space|hash|dot] [--quiet] [--snapshot PATH]
-[--live] [--interval SECS] [--follow]``.
+[--live] [--interval SECS] [--follow] [--max-frames N]``.
 
 Exit codes: 0 ok, 1 ``--file`` not found, 2 usage / no source /
 invalid args.
@@ -199,6 +199,18 @@ file). Without ``--live`` it is a one-shot render-and-exit, useful
 for piping a file's tail through a magnifier. The derivation lives
 in :func:`whisperpaw.zoom._tail_offset` so the math is testable
 without touching the loop.
+
+``--max-frames N`` is a *loop-iteration cap*: it bounds the
+``--live`` loop to N iterations (default: 0 = unlimited, the
+current behaviour). Without it, ``--live`` on a quiet source
+loops forever waiting for a change that never arrives; the cap
+gives scripts a deterministic, bounded window. It counts
+*iterations* (polls), not emitted frames — a static file under
+``--max-frames 2`` emits 1 frame (the initial state) and then
+exits on the second iteration. Composes with ``--follow``,
+``--snapshot``, and the standard ``--interval`` poll cadence.
+Has no effect without ``--live`` (the one-shot render always
+emits exactly one frame).
 
 ---
 
@@ -226,4 +238,5 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-16 — paw-zoom: add --snapshot PATH flag (render viewport to file). 8 new tests, 263/263 green.
 - 2026-09-16 — paw-zoom: add --live / --interval flags. --live re-renders the magnified viewport every time --file PATH changes (mtime-tracked, change-detected), with --interval SECS controlling the poll cadence. Composes with --snapshot (each frame rewrites the file). 12 new tests, 275/275 green.
 - 2026-09-17 — paw-zoom: add --follow flag. --follow is a row-offset modifier that makes the viewport show the last --rows lines of the source (like `tail -n N`) instead of the first --rows. Composes with --live (so the magnifier tracks new lines as they arrive — the natural use case for log magnifiers) and --snapshot. 13 new tests, 288/288 green. Static completion files regenerated.
+- 2026-09-17 — paw-zoom: add --max-frames N flag. Caps the --live loop at N iterations (default: 0 = unlimited) so scripts can bound the run on a quiet source. Counts iterations, not emitted frames. 10 new tests, 298/298 green. Static completion files regenerated.
 <!-- TICK-LOG-END -->

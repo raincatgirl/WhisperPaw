@@ -297,6 +297,7 @@ def _tail_and_render(
     *,
     interval: float,
     follow: bool = False,
+    max_frames: int = 0,
     stop_predicate=None,
     clock=None,
     sink=None,
@@ -324,6 +325,18 @@ def _tail_and_render(
     log magnifiers: a 5-row viewport on a 1000-line log file
     follows the latest lines as they arrive.
 
+    When ``max_frames`` is positive, the loop runs at most that many
+    *iterations* (not emitted frames) before exiting. So a static
+    source under ``max_frames=2`` emits 1 frame (the initial state)
+    and then exits on the second iteration, even though no second
+    frame was emitted. This makes the flag actually terminate a
+    ``--live`` session — without it, an idle source would loop
+    forever waiting for a change that never arrives. ``0`` (the
+    default) means no cap. Composes with everything else (``--follow``,
+    ``--snapshot``, ``--interval``) and is useful for scripting:
+    "render the first N polls, then exit" — a bounded, deterministic
+    window onto a live log.
+
     Returns ``0`` on a clean exit. Errors are surfaced as a single
     stderr line and the loop continues — a transient ENOENT during
     log rotation shouldn't kill the magnifier.
@@ -335,7 +348,19 @@ def _tail_and_render(
     sleep = clock if clock is not None else time.sleep
     last_text: str | None = None
     last_mtime: float | None = None
+    # When ``max_frames`` is set, the loop runs at most that many
+    # iterations — not just that many emitted frames. A static file
+    # under ``max_frames=2`` therefore emits 1 frame (the initial
+    # state) and then exits on the second iteration, even though no
+    # second frame was emitted. This makes the flag actually
+    # terminate a ``--live`` session; without it, an idle source
+    # would loop forever waiting for a change that never arrives.
+    max_iters = max_frames if max_frames > 0 else None
+    iter_count = 0
     while stop_predicate is None or not stop_predicate():
+        if max_iters is not None and iter_count >= max_iters:
+            break
+        iter_count += 1
         try:
             text = _read_file_text(path)
         except FileNotFoundError:
@@ -516,6 +541,23 @@ def build_parser() -> argparse.ArgumentParser:
             "before magnifying)."
         ),
     )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Cap --live at N loop iterations (default: 0 = unlimited, "
+            "the current behaviour). The loop stops after the N-th "
+            "poll regardless of whether a frame was emitted, which "
+            "is what makes --live actually exit on a quiet source. "
+            "Useful for scripting: 'render the first 3 changes, then "
+            "exit'. Composes with --follow, --snapshot, and the "
+            "standard --interval poll cadence. Has no effect without "
+            "--live (the one-shot render always emits exactly one "
+            "frame)."
+        ),
+    )
     return parser
 
 
@@ -552,6 +594,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         print(
             "paw-zoom: --live requires --file PATH "
             "(there is no stdin to tail)",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if args.max_frames < 0:
+        print(
+            "paw-zoom: --max-frames must be >= 0 (0 means unlimited)",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -638,6 +686,7 @@ def main(argv: list[str] | None = None) -> int:
                 cfg,
                 interval=args.interval,
                 follow=args.follow,
+                max_frames=args.max_frames,
                 sink=_sink,
             )
         except KeyboardInterrupt:

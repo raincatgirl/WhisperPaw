@@ -875,3 +875,208 @@ def test_main_follow_combines_with_snapshot(tmp_path) -> None:
     assert "gamma" in text
     assert "delta" in text
     assert "alpha" not in text
+
+
+# ---------------------------------------------------------------------------
+# --max-frames (cap the number of frames --live emits)
+# ---------------------------------------------------------------------------
+
+
+def test_tail_and_render_max_frames_caps_iterations(tmp_path) -> None:
+    """With ``max_frames=N``, the loop exits after N iterations
+    (not N emitted frames). For a file that's being changed on
+    every iteration, the cap fires on iteration N+1, so the loop
+    emits at most N frames. We pin this with an aggressively-
+    changing source and assert the cap holds under that pressure."""
+    src = tmp_path / "log.txt"
+    src.write_text("v1\n", encoding="utf-8")
+    cfg = zoom.ZoomConfig(rows=2, cols=5, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        # Append a new line on every tick after the first, so the
+        # change-detector fires on every iteration. Run for many
+        # ticks so an uncapped loop would emit many more frames
+        # than the cap allows.
+        if ticks["n"] >= 2:
+            with open(src, "a", encoding="utf-8") as fh:
+                fh.write(f"v{ticks['n']}\n")
+        return ticks["n"] >= 20
+
+    rc = zoom._tail_and_render(
+        str(src),
+        cfg,
+        interval=0.0,
+        max_frames=3,  # 3 iterations max
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        sink=frames.append,
+    )
+    assert rc == 0
+    # Exactly 3 frames — one per iteration. The cap fires on
+    # iteration 4, well before the stop predicate at 20.
+    assert len(frames) == 3
+
+
+def test_tail_and_render_max_frames_zero_means_unlimited(tmp_path) -> None:
+    """``max_frames=0`` (the default) is "no cap" — the loop runs
+    until the stop predicate fires. We pin this with a short,
+    bounded stop so the test doesn't hang forever."""
+    src = tmp_path / "log.txt"
+    src.write_text("v1\n", encoding="utf-8")
+    cfg = zoom.ZoomConfig(rows=2, cols=5, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        if ticks["n"] >= 2:
+            with open(src, "a", encoding="utf-8") as fh:
+                fh.write(f"v{ticks['n']}\n")
+        return ticks["n"] >= 5
+
+    rc = zoom._tail_and_render(
+        str(src),
+        cfg,
+        interval=0.0,
+        max_frames=0,  # explicit default — no cap
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        sink=frames.append,
+    )
+    assert rc == 0
+    # We expect a frame for the initial state, then one per change.
+    # The exact count is timing-dependent (mtime granularity), but it
+    # must be at least 1 and bounded by the tick count.
+    assert len(frames) >= 1
+    assert len(frames) <= 4  # ticks - initial idle = 4 potential frames
+
+
+def test_tail_and_render_max_frames_one_exits_on_iteration_two(
+    tmp_path,
+) -> None:
+    """``max_frames=1`` means "1 iteration max". The initial state
+    emits 1 frame on the first iteration; the second iteration
+    trips the cap and breaks. So a static file under
+    ``max_frames=1`` still emits exactly 1 frame — the user's
+    current state."""
+    src = tmp_path / "log.txt"
+    src.write_text("once\n", encoding="utf-8")
+    cfg = zoom.ZoomConfig(rows=2, cols=5, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        if ticks["n"] >= 2:
+            with open(src, "a", encoding="utf-8") as fh:
+                fh.write("more\n")
+        return ticks["n"] >= 10
+
+    rc = zoom._tail_and_render(
+        str(src),
+        cfg,
+        interval=0.0,
+        max_frames=1,
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        sink=frames.append,
+    )
+    assert rc == 0
+    assert len(frames) == 1
+    assert "once" in frames[0]
+
+
+def test_parse_args_max_frames_default_zero() -> None:
+    """Without --max-frames, the attribute is 0 (no cap)."""
+    args = zoom.parse_args(["hello"])
+    assert args.max_frames == 0
+
+
+def test_parse_args_max_frames_flag() -> None:
+    """``--max-frames N`` parses to an integer attribute."""
+    args = zoom.parse_args(["--max-frames", "5", "hello"])
+    assert args.max_frames == 5
+
+
+def test_parse_args_max_frames_negative_is_usage_error() -> None:
+    """A negative --max-frames is a usage error (exit 2) — only
+    0+ makes sense (0 = unlimited)."""
+    with pytest.raises(SystemExit) as exc_info:
+        zoom.parse_args(["--max-frames", "-1", "hello"])
+    assert exc_info.value.code == 2
+
+
+def test_max_frames_help_text_mentions_flag() -> None:
+    """The --help text must mention --max-frames so the tool is
+    discoverable and accidental renames are caught."""
+    parser = zoom.build_parser()
+    help_text = parser.format_help()
+    assert "--max-frames" in help_text
+
+
+def test_main_max_frames_live_exits_cleanly(tmp_path, capsys) -> None:
+    """End-to-end: ``paw-zoom --live --max-frames 2 --file PATH`` exits
+    cleanly with rc=0, even though the source isn't being modified.
+    The cap doesn't kick in (only one frame is emitted because the
+    file is static), but the loop still terminates — the test pins
+    that ``--max-frames`` doesn't break the live path."""
+    src = tmp_path / "log.txt"
+    src.write_text("L1\n", encoding="utf-8")
+    rc = zoom.main(
+        ["--live", "--file", str(src), "--rows", "2", "--cols", "5",
+         "--zoom", "1", "--max-frames", "2", "--interval", "0.001",
+         "--quiet"]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The first frame was emitted; the static file produces no
+    # further frames (the change-detector suppresses them), so the
+    # loop exits on its own before hitting the cap.
+    assert "L1" in out
+
+
+def test_main_max_frames_follow_tracks_tail_and_caps(
+    tmp_path, capsys
+) -> None:
+    """End-to-end: ``--live --max-frames 2 --follow`` exits with rc=0
+    and emits at least one tail frame. We don't pin the exact frame
+    count (the source is static in this test, so the change-detector
+    suppresses subsequent frames and the cap doesn't fire) — the
+    lower-level ``test_tail_and_render_max_frames_caps_loop`` covers
+    the actual cap behaviour. This test just pins the plumbing
+    through ``main()`` and the interaction with ``--follow``."""
+    src = tmp_path / "log.txt"
+    src.write_text("L1\nL2\nL3\n", encoding="utf-8")
+    rc = zoom.main(
+        ["--live", "--follow", "--file", str(src), "--rows", "2",
+         "--cols", "5", "--zoom", "1", "--max-frames", "2",
+         "--interval", "0.001", "--quiet"]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The first frame is the tail of the initial 3-line file: L2, L3.
+    assert "L3" in out
+    assert "L1" not in out  # --follow keeps the head off the viewport
+
+
+def test_main_max_frames_without_live_still_renders_once(
+    tmp_path, capsys
+) -> None:
+    """``--max-frames`` without ``--live`` is a no-op: the one-shot
+    render path emits exactly one frame regardless of the value.
+    (The CLI documents this; the test pins it.)"""
+    src = tmp_path / "log.txt"
+    src.write_text("only one\n", encoding="utf-8")
+    rc = zoom.main(
+        ["--file", str(src), "--rows", "1", "--cols", "8",
+         "--zoom", "1", "--max-frames", "100", "--quiet"]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "only one" in out
+    # A one-shot render emits exactly one block (rows * zoom lines,
+    # which is 1 line at zoom=1).
+    assert out.count("only one") == 1

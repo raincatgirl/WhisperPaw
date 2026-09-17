@@ -63,4 +63,5 @@ extern "paw-zoom" [
     --live: string  # Follow --file PATH like 'tail -f': re-render the magnified viewport every time…
     --interval: string  # Poll interval in seconds for --live (default: 0.25, must be > 0).
     --follow: string  # Track the tail of --file PATH (like 'tail -f') instead of showing the start.
+    --max-frames: string  # Cap --live at N loop iterations (default: 0 = unlimited, the current behaviour).
 ]

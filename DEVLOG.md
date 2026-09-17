@@ -941,3 +941,90 @@ so v0.2 can plug a per-OS capture adapter (Wayland / X11 /
 Win32 GDI) in front of `_tail_and_render` without changing the
 math or the CLI. Likely still two ticks: (a) adapter skeleton
 + a Linux X11 adapter, (b) the macOS / Windows adapters.
+
+## 2026-09-17 — `paw-zoom` grows `--max-frames` (bounded live mode)
+
+**What changed.** Added a new integer flag to `paw-zoom`:
+`--max-frames N`. It caps the `--live` loop at N *iterations*
+(polls), not N emitted frames — the default is `0` (unlimited, the
+current behaviour). So `paw-zoom --live --max-frames 2 --file PATH`
+runs the poll loop at most twice and then exits cleanly, regardless
+of whether the source changed. The flag composes with `--follow`,
+`--snapshot`, and the standard `--interval` poll cadence. It has no
+effect without `--live` (the one-shot render always emits exactly
+one frame).
+
+**Why now.** `--live` is genuinely useful as a log magnifier, but
+scripts that wrap it (`paw-zoom --live --snapshot shot.txt &`,
+then `kill $!` after a timeout, or `timeout 5s paw-zoom --live …`)
+had to reach for an external `timeout` / `kill` to bound the run.
+`--max-frames` is the in-tool primitive: "render the first N polls,
+then exit" is a one-flag operation. It also makes the live mode
+testable end-to-end without threads, because the loop has a
+deterministic iteration count.
+
+**The semantic trap I almost shipped, then fixed.** My first
+implementation counted *emitted* frames and only broke the loop
+when `frames_emitted >= max_frames`. That's a footgun: on a static
+file, the first poll emits one frame, then every subsequent poll
+suppresses (the change-detector says "no change"). So
+`--max-frames 2` on a static file would have looped forever, never
+emitting a second frame. Fixed by counting *iterations* instead —
+the cap now fires on the N-th poll regardless of whether a frame
+was emitted. The docstring, help text, and tests all reflect this
+("N iterations, not N frames").
+
+**How.** Three small changes to `_tail_and_render`:
+
+* New `max_frames: int = 0` keyword-only argument.
+* New local `iter_count` and `max_iters = max_frames if > 0 else None`.
+* Loop guard: `if max_iters is not None and iter_count >= max_iters: break`,
+  with `iter_count += 1` at the top of the loop body.
+
+`main()` validates `--max-frames >= 0` (negative is exit 2 with a
+clear stderr message) and threads the value into the call. The
+argparse help text explains the iteration-vs-frame distinction so
+users don't get bitten by the same trap.
+
+**Tests.** 10 new tests in `tests/test_zoom.py`:
+
+* `test_tail_and_render_max_frames_caps_iterations` — with an
+  aggressively-changing source (appends a line on every tick),
+  `max_frames=3` produces exactly 3 frames; the stop predicate
+  fires at 20 ticks, well after the cap.
+* `test_tail_and_render_max_frames_zero_means_unlimited` —
+  explicit `max_frames=0` is a no cap; loop runs to the stop
+  predicate.
+* `test_tail_and_render_max_frames_one_exits_on_iteration_two` —
+  `max_frames=1` emits 1 frame (initial state), then iteration 2
+  trips the cap and breaks.
+* `test_parse_args_max_frames_default_zero` / `..._flag` /
+  `..._negative_is_usage_error` — argparse layer: default, parse,
+  and the negative-value exit-2 error.
+* `test_max_frames_help_text_mentions_flag` — the --help text
+  mentions `--max-frames` (catches accidental renames).
+* `test_main_max_frames_live_exits_cleanly` — end-to-end with a
+  static file: rc=0, content emitted, loop terminates.
+* `test_main_max_frames_follow_tracks_tail_and_caps` —
+  end-to-end with `--follow`: rc=0, tail content present, head
+  absent (proving the row-offset modifier still works).
+* `test_main_max_frames_without_live_still_renders_once` —
+  `--max-frames` without `--live` is a no-op (one-shot render
+  always emits exactly one frame).
+
+**Bookkeeping.** Regenerated all four static shell-completion
+files (`completions/whisperpaw.{bash,zsh,fish,nu}`) so the new
+flag shows up in Tab completion for every shell. The byte-
+identity test in `tests/test_completions.py` caught the drift
+and forced the regen.
+
+**Total: 298/298 green** (10 new + 288 existing). Pure stdlib,
+no new deps, no telemetry, no network.
+
+**Next tick.** `paw-zoom` v0.2 — the real screen-capture render.
+The loop shape is now fully battle-tested on a text source
+(`--live`, `--follow`, `--max-frames`), so v0.2 can plug a per-OS
+capture adapter in front of `_tail_and_render` without changing
+the math, the CLI, or the loop. Likely still two ticks: (a)
+adapter skeleton + a Linux X11 adapter, (b) the macOS / Windows
+adapters.

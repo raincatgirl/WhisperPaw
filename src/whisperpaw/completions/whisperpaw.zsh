@@ -69,6 +69,7 @@ _paw_zoom() {
     '--snapshot[Write the rendered viewport to PATH instead of stdout.]' \
     '--live[Follow --file PATH like ''tail -f'': re-render the magnified viewport every time…]' \
     '--interval[Poll interval in seconds for --live (default: 0.25, must be > 0).]' \
-    '--follow[Track the tail of --file PATH (like ''tail -f'') instead of showing the start.]'
+    '--follow[Track the tail of --file PATH (like ''tail -f'') instead of showing the start.]' \
+    '--max-frames[Cap --live at N loop iterations (default: 0 = unlimited, the current behaviour).]'
 }
 _paw_zoom "$@"
