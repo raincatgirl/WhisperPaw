@@ -1181,3 +1181,47 @@ adapters (X11 / Win32 / Quartz) are the next three ticks,
 each a self-contained ~50-line module that drops into
 `_BACKEND_FACTORIES` and makes `paw-zoom --screen` actually
 capture pixels.
+
+---
+
+## 2026-09-17 — paw-zoom v0.2: real X11 screen-capture adapter
+
+**What changed.** New module `whisperpaw._x11` ships a real
+`X11Screen(ScreenCapture)` adapter. It shells out to `xwd
+-root -silent -out -` (the X Window Dump utility, ships with
+`x11-utils` on Debian / `xorg-x11-utils` on Fedora /
+`xorg-xwd` on Arch), parses the 56-byte XWD header (in the
+server's native byte order — both LE and BE supported via a
+two-pass `struct.unpack` that picks the sane interpretation),
+skips the optional colour-map section, then downsamples the
+raw BGR/BGRX pixel data to a 5-character density grid
+(`' \u2591\u2592\u2593\u2588'`) — same shape `FakeScreen.capture`
+returns, so the v0.1 pipeline picks it up unchanged.
+
+The factory in `whisperpaw._screen._x11_capture` now lazily
+imports `whisperpaw._x11` and delegates to
+`build_x11_screen()`, which returns `None` on a headless box
+(no `$DISPLAY`, no `xwd`) and a real `X11Screen` on a Linux
+desktop. Discovery helpers `is_x11_available()` accepts
+injectable `env=` and `which=` so tests don't monkeypatch
+`os.environ` / `shutil.which`. The subprocess runner is an
+injectable `Runner` callable; the default is
+`_default_runner`, a thin `subprocess.run(check=False)`
+wrapper. Tests synthesize XWD byte streams in memory and feed
+them through the adapter, so no real X server is needed.
+
+**Why.** v0.2 (last tick) shipped the `ScreenCapture` protocol
+and the `FakeScreen` reference; the X11 / Win32 / Quartz
+stubs were the next three ticks. This is the first one. The
+rest of the v0.2 pipeline (`--screen`, `--region`, `--backend`,
+`--fake-grid`, `--list-backends`, `--json`) is unchanged — the
+adapter slots in behind the same protocol, and on a Linux
+desktop `paw-zoom --screen --backend x11` now actually
+captures pixels instead of printing "not yet implemented".
+
+**What's next.** The Win32 GDI adapter (similar shape, uses
+`gdi32` via `ctypes` — the only adapter that *will* need a
+non-pure-stdlib helper, and even then `ctypes` is in the
+stdlib so no new pip deps). Then Quartz (`screencapture` on
+macOS, or a small `CoreGraphics` call). Both are still ~1
+tick each.

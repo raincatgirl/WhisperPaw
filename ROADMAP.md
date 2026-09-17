@@ -315,6 +315,7 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-17 — paw-zoom: add --follow flag. --follow is a row-offset modifier that makes the viewport show the last --rows lines of the source (like `tail -n N`) instead of the first --rows. Composes with --live (so the magnifier tracks new lines as they arrive — the natural use case for log magnifiers) and --snapshot. 13 new tests, 288/288 green. Static completion files regenerated.
 - 2026-09-17 — paw-zoom: add --max-frames N flag. Caps the --live loop at N iterations (default: 0 = unlimited) so scripts can bound the run on a quiet source. Counts iterations, not emitted frames. 10 new tests, 298/298 green. Static completion files regenerated.
 - 2026-09-17 — paw-zoom v0.2: ship the screen-capture adapter skeleton. New `whisperpaw._screen` module with a `ScreenCapture` ABC (two methods: `screen_size()` + `capture(x,y,w,h) -> list[str]`), a `FakeScreen` reference implementation, and a `get_capture()` factory. CLI gains `--screen` / `--region X,Y,W,H` / `--backend {auto,fake,x11,win32,quartz}` / `--fake-grid` / `--list-backends` / `--json`. The OS-specific adapters ship as stubs that return None with a friendly "not yet implemented on this OS" message; the v0.1 pipeline (text-source magnifier, --live, --follow, --max-frames, --snapshot) is unchanged. 52 new tests, 350/350 green. Static completion files regenerated.
+- 2026-09-17 — paw-zoom v0.2: ship a real X11 adapter. New `whisperpaw._x11` module with `X11Screen(ScreenCapture)` that shells out to `xwd -root -silent -out -`, parses the 56-byte XWD header (both LE and BE supported), and downsamples the raw BGR/BGRX pixel data to a 5-character density grid. `is_x11_available()` checks `$DISPLAY` + `xwd` on `$PATH`; `build_x11_screen()` returns None on a headless box and a real instance on a Linux desktop. The subprocess runner and discovery checks are injectable so tests don't need a real X server. Wired into `whisperpaw._screen._x11_capture`; on a real Linux desktop `paw-zoom --screen --backend x11` now actually captures pixels instead of printing "not yet implemented". 43 new tests, 393/393 green. Static completion files unchanged.
 <!-- TICK-LOG-END -->
 
 (Updated 2026-09-17: `paw-zoom` v0.2 ships the screen-capture
@@ -325,4 +326,15 @@ adapters (X11 / Win32 / Quartz) ship as stubs that print a clear
 "not yet implemented on this OS" message and exit 1. The existing
 v0.1 pipeline is unchanged — v0.2 only adds the seam in front
 of it. Next tick: ship a real X11 adapter as a self-contained
-~50-line module.)
+~50-line module.
+
+Updated 2026-09-17 (later same day): the X11 adapter is shipped.
+New `whisperpaw._x11` module with `X11Screen(ScreenCapture)`,
+`is_x11_available()`, `build_x11_screen()`, and the two-pass
+LE/BE `_parse_xwd_header` helper. On a real Linux desktop
+`paw-zoom --screen --backend x11` now actually captures pixels
+(using `xwd -root -silent -out -`); on a headless box the
+factory returns `None` and the CLI prints the friendly
+"not yet implemented on this OS" message. The Win32 and Quartz
+adapters are the next two ticks, each a self-contained
+~100-line module that drops into `_BACKEND_FACTORIES`.)

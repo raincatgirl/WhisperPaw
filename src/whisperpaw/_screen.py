@@ -335,14 +335,17 @@ def capture_screen_to_source(
 def _x11_capture() -> ScreenCapture | None:
     """Return a real X11 adapter if one can be constructed.
 
-    Right now this is a stub: the X11 adapter is the next tick.
-    We deliberately do *not* try to import ``Xlib`` / ``python-xlib``
-    here — the user's system may not have it, and we don't want
-    ``paw-zoom --screen`` to crash with an ``ImportError`` on
-    import. The dispatcher in :func:`get_capture` prints a clear
-    "not yet implemented" message instead.
+    Linux-only: imports the adapter module lazily so the
+    ``whisperpaw._screen`` module itself stays importable on
+    Windows / macOS (where ``whisperpaw._x11`` would also be
+    importable but the underlying ``xwd`` binary isn't
+    present). The :func:`whisperpaw._x11.build_x11_screen`
+    factory returns ``None`` when ``$DISPLAY`` is unset or
+    ``xwd`` isn't on ``$PATH`` — both of which are the
+    common case on a headless box.
     """
-    return None
+    from whisperpaw import _x11
+    return _x11.build_x11_screen()
 
 
 def _win32_capture() -> ScreenCapture | None:
