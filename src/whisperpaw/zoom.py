@@ -37,6 +37,8 @@ import sys
 import time
 from dataclasses import dataclass
 
+from whisperpaw import _screen
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -558,6 +560,21 @@ def build_parser() -> argparse.ArgumentParser:
             "frame)."
         ),
     )
+    # v0.2: screen-capture flags. The group lives behind
+    # ``add_screen_args`` so the parser stays readable.
+    _screen.add_screen_args(parser)
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help=(
+            "Combine with --list-backends to emit a single-line "
+            "JSON object instead of one-name-per-line text. The "
+            "object has one key ('backends') whose value is the "
+            "list. Nothing is captured. Using --json without "
+            "--list-backends is a usage error (exit 2)."
+        ),
+    )
     return parser
 
 
@@ -603,6 +620,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             file=sys.stderr,
         )
         raise SystemExit(2)
+    # v0.2: --fake-grid needs --backend fake (otherwise it has
+    # nothing to do, and silently ignoring the grid would be a
+    # confusing footgun). --screen without a usable backend
+    # (including 'auto' on a system with no OS adapter yet)
+    # becomes a runtime error in main(), not here, because
+    # 'auto' is genuinely "try what you can".
+    if args.fake_grid is not None and args.backend != "fake":
+        print(
+            "paw-zoom: --fake-grid requires --backend fake",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    # --region needs --screen; we don't want a typo like
+    # ``--region 0,0,10,5`` (forgetting --screen) to silently
+    # parse and then do nothing.
+    if args.region is not None and not args.screen:
+        print(
+            "paw-zoom: --region requires --screen",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    # --json only pairs with --list-backends. Anything else is
+    # ambiguous — an empty JSON object would be a worse failure
+    # mode than a clear stderr message.
+    if args.as_json and not args.list_backends:
+        print(
+            "paw-zoom: --json requires --list-backends",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     # The --charset choice is enforced by argparse, but the resolved
     # fill char is what the renderer needs. Stash it on the namespace.
     args.fill = _CHARSET_FILLS[args.charset]
@@ -617,19 +664,58 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(argv)
-        source = _resolve_source(
-            text=args.text,
-            file=args.file,
-            stdin_text=_read_stdin(),
-        )
     except SystemExit as exc:
         return int(exc.code) if isinstance(exc.code, int) else 2
-    except FileNotFoundError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
-    except RuntimeError as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
+
+    # v0.2: discovery short-circuit. ``--list-backends`` and
+    # ``--list-backends --json`` exit 0 without doing any
+    # source resolution or capture — they are pure metadata
+    # about what backends the binary knows about, useful for
+    # shell completion and for ``jq``-driven tooling.
+    if args.list_backends:
+        if args.as_json:
+            print(_screen.to_json("backends"))
+        else:
+            for name in _screen.list_backends():
+                print(name)
+        return 0
+
+    # v0.2: --screen takes over source resolution. We bypass
+    # ``_resolve_source`` entirely and capture from a
+    # ``ScreenCapture`` adapter instead. The captured grid
+    # becomes the source string the rest of the pipeline
+    # (ZoomConfig, render_viewport, --snapshot, --live /
+    # --follow / --max-frames) already understands.
+    if args.screen:
+        fake_grid: list[str] | None = None
+        if args.fake_grid is not None:
+            try:
+                fake_grid = _screen._read_fake_grid(args.fake_grid)
+            except ValueError as exc:
+                print(f"paw-zoom: {exc}", file=sys.stderr)
+                return 2
+        cap = _screen.get_capture(args.backend, fake_grid=fake_grid)
+        if cap is None:
+            print(_screen.backend_unsupported_message(args.backend), file=sys.stderr)
+            return 1
+        try:
+            source = _screen.capture_screen_to_source(cap, region=args.region)
+        except ValueError as exc:
+            print(f"paw-zoom: {exc}", file=sys.stderr)
+            return 2
+    else:
+        try:
+            source = _resolve_source(
+                text=args.text,
+                file=args.file,
+                stdin_text=_read_stdin(),
+            )
+        except FileNotFoundError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
 
     cfg = ZoomConfig(
         rows=args.rows,

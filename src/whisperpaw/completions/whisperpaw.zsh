@@ -70,6 +70,12 @@ _paw_zoom() {
     '--live[Follow --file PATH like ''tail -f'': re-render the magnified viewport every time…]' \
     '--interval[Poll interval in seconds for --live (default: 0.25, must be > 0).]' \
     '--follow[Track the tail of --file PATH (like ''tail -f'') instead of showing the start.]' \
-    '--max-frames[Cap --live at N loop iterations (default: 0 = unlimited, the current behaviour).]'
+    '--max-frames[Cap --live at N loop iterations (default: 0 = unlimited, the current behaviour).]' \
+    '--screen[Capture a rectangular region of the visual screen and magnify it, instead of ma…]' \
+    '--region[Screen rectangle to capture when --screen is set.]' \
+    '--backend[Screen-capture backend to use when --screen is set (default: auto — picks the f…]' \
+    '--fake-grid[With --backend fake, the text used as the ''screen'' (rows separated by ''\n'').]' \
+    '--list-backends[Print the names of every supported screen-capture backend, one per line, and ex…]' \
+    '--json[Combine with --list-backends to emit a single-line JSON object instead of one-n…]'
 }
 _paw_zoom "$@"

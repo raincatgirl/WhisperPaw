@@ -27,7 +27,7 @@ This document is the **single source of truth** for what WhisperPaw will be and 
 | `paw-read`  | ✅ shipped | Read text aloud (stdin / file / clipboard). |
 | `paw-watch` | ✅ shipped | Tail a command and speak new lines. |
 | `paw-complete` | ✅ shipped | Print shell completions (bash / zsh / fish / nushell) for every shipped tool, derived live from each tool's argparse parser. |
-| `paw-zoom`  | ✅ shipped (v0.1) | Magnify a rectangular region of text (ASCII proof-of-concept). Real screen-capture render lands in a later tick. |
+| `paw-zoom`  | ✅ shipped (v0.2) | Magnify a rectangular region of text or of the **screen** (v0.2). v0.1 was an ASCII text-viewport POC; v0.2 adds a `ScreenCapture` adapter protocol, a `FakeScreen` reference implementation, and CLI flags (`--screen`, `--region X,Y,W,H`, `--backend {auto,fake,x11,win32,quartz}`, `--fake-grid`, `--list-backends`, `--json`). The OS-specific adapters (X11 / Win32 / Quartz) ship as stubs that return `None` with a friendly stderr message; the data shape and the rest of the pipeline are real today. |
 
 Legend: 🐣 planned · 🛠 in progress · ✅ shipped · 🐛 buggy
 
@@ -212,6 +212,81 @@ exits on the second iteration. Composes with ``--follow``,
 Has no effect without ``--live`` (the one-shot render always
 emits exactly one frame).
 
+### `paw-zoom` v0.2 (screen-capture adapter skeleton)
+
+v0.2 adds the **screen-capture seam** without yet shipping real
+per-OS adapters. The design is a small ``ScreenCapture`` ABC
+with two methods:
+
+* ``screen_size() -> tuple[int, int]`` — display extent.
+* ``capture(*, x, y, w, h) -> list[str]`` — a ``h``×``w`` sub-grid
+  of the screen as a list of strings, padded with spaces for
+  out-of-screen cells.
+
+That contract is small enough that a real X11 / Win32 / Quartz
+adapter slots in as one new file implementing two methods; the
+rest of the pipeline (ZoomConfig, _extract_region, _magnify,
+render_viewport, --live / --follow / --max-frames / --snapshot)
+stays unchanged because the captured grid is already in the
+``list[str]`` shape the renderer accepts.
+
+**Reference implementation**: ``FakeScreen`` is an in-memory
+string grid that implements the same ABC. It exists so the
+entire v0.2 pipeline (capture → region parse → render →
+magnify → snapshot) is testable on a headless box without an
+X server, a display, or any third-party library. The OS
+adapters ship as stubs that return ``None`` from the factory;
+``main()`` translates that to exit 1 + a friendly stderr
+message that names the backend and points the user at
+``--backend fake`` as a workaround.
+
+**CLI additions**:
+
+* ``--screen`` — switch from text-source mode to screen-capture
+  mode. Incompatible with the existing ``text`` / ``--file`` /
+  ``stdin`` source resolution: the captured grid becomes the
+  source string instead.
+* ``--region X,Y,W,H`` (or ``full``, the default) — the
+  rectangle to capture. Clamped to the screen's extent; out-of-
+  range components are a usage error (negative integers almost
+  always signal a typo).
+* ``--backend {auto,fake,x11,win32,quartz}`` — which
+  ``ScreenCapture`` to use. ``auto`` walks the OS adapters in
+  order (x11 → win32 → quartz) and returns the first that
+  succeeds. ``fake`` requires ``--fake-grid``.
+* ``--fake-grid TEXT`` — the text used as the "screen" when
+  ``--backend fake`` is set. Rows separated by ``\n``. Required
+  with ``--backend fake``; rejected at parse time otherwise
+  (silent ignore would be a confusing footgun).
+* ``--list-backends`` — print the known backend names, one per
+  line, exit 0. Short-circuits before any capture.
+* ``--json`` — combine with ``--list-backends`` to emit a
+  single-line, parseable ``{"backends": [...]}`` object instead.
+
+**Discovery helpers** (the same data the CLI prints, exposed as
+plain functions so ``paw-complete`` and tests don't have to
+reach into the parser):
+
+* :func:`whisperpaw._screen.list_backends` — returns
+  ``["fake", "x11", "win32", "quartz"]`` (canonical order).
+* :func:`whisperpaw._screen.to_json("backends")` — the exact
+  single-line JSON string the CLI emits with ``--json``.
+
+**The v0.1 → v0.2 split, by design**. v0.1 nailed the *text
+viewport* math, the magnification primitive, the source
+resolver, the argparse layer, and the live / follow / tail /
+max-frames loop. v0.2 adds the *screen-capture seam* (one
+small module, one protocol, one reference adapter) without
+touching anything that came before. The next ticks — "ship a
+real X11 adapter" and "ship a real Win32 adapter" — are then
+small, self-contained, and independently testable: drop a new
+file into ``whisperpaw/`` that implements two methods, register
+it in :data:`whisperpaw._screen._BACKEND_FACTORIES`, and the
+rest of the pipeline picks it up for free.
+
+**Exit codes**: 0 ok, 1 no backend / no source / no TTS, 2 usage
+/ no source / invalid args. Same convention as v0.1.
+
 ---
 
 ## 📅 Tick log
@@ -239,4 +314,15 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-16 — paw-zoom: add --live / --interval flags. --live re-renders the magnified viewport every time --file PATH changes (mtime-tracked, change-detected), with --interval SECS controlling the poll cadence. Composes with --snapshot (each frame rewrites the file). 12 new tests, 275/275 green.
 - 2026-09-17 — paw-zoom: add --follow flag. --follow is a row-offset modifier that makes the viewport show the last --rows lines of the source (like `tail -n N`) instead of the first --rows. Composes with --live (so the magnifier tracks new lines as they arrive — the natural use case for log magnifiers) and --snapshot. 13 new tests, 288/288 green. Static completion files regenerated.
 - 2026-09-17 — paw-zoom: add --max-frames N flag. Caps the --live loop at N iterations (default: 0 = unlimited) so scripts can bound the run on a quiet source. Counts iterations, not emitted frames. 10 new tests, 298/298 green. Static completion files regenerated.
+- 2026-09-17 — paw-zoom v0.2: ship the screen-capture adapter skeleton. New `whisperpaw._screen` module with a `ScreenCapture` ABC (two methods: `screen_size()` + `capture(x,y,w,h) -> list[str]`), a `FakeScreen` reference implementation, and a `get_capture()` factory. CLI gains `--screen` / `--region X,Y,W,H` / `--backend {auto,fake,x11,win32,quartz}` / `--fake-grid` / `--list-backends` / `--json`. The OS-specific adapters ship as stubs that return None with a friendly "not yet implemented on this OS" message; the v0.1 pipeline (text-source magnifier, --live, --follow, --max-frames, --snapshot) is unchanged. 52 new tests, 350/350 green. Static completion files regenerated.
 <!-- TICK-LOG-END -->
+
+(Updated 2026-09-17: `paw-zoom` v0.2 ships the screen-capture
+adapter skeleton — `ScreenCapture` ABC + `FakeScreen` reference
+implementation + CLI flags `--screen` / `--region` / `--backend` /
+`--fake-grid` / `--list-backends` / `--json`. The OS-specific
+adapters (X11 / Win32 / Quartz) ship as stubs that print a clear
+"not yet implemented on this OS" message and exit 1. The existing
+v0.1 pipeline is unchanged — v0.2 only adds the seam in front
+of it. Next tick: ship a real X11 adapter as a self-contained
+~50-line module.)
