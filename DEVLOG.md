@@ -1225,3 +1225,75 @@ non-pure-stdlib helper, and even then `ctypes` is in the
 stdlib so no new pip deps). Then Quartz (`screencapture` on
 macOS, or a small `CoreGraphics` call). Both are still ~1
 tick each.
+
+---
+
+## 2026-09-18 — paw-zoom v0.2: real Win32 GDI screen-capture adapter
+
+**What changed.** New module `whisperpaw._win32` ships a real
+`Win32Screen(ScreenCapture)` adapter. It does the full
+Win32 GDI dance — `GetDC(NULL)` → `CreateCompatibleDC` →
+`CreateCompatibleBitmap` → `SelectObject` → `BitBlt(...SRCCOPY)`
+→ `GetDIBits` — via `ctypes` (which is stdlib, so no new pip
+deps), gets back a 32-bpp BGRX pixel buffer of the requested
+screen rectangle, and downsamples it to the same 5-character
+density grid the X11 adapter produces
+(`' \\u2591\\u2592\\u2593\\u2588'`).
+
+The ctypes plumbing is lazy: `_default_capture` and
+`_default_screen_size` only `import ctypes` and load
+`gdi32` / `user32` on the first capture call. The module
+itself — and `whisperpaw._screen` — stay importable on every
+platform, so the `import whisperpaw` import in any other tool
+never breaks on a non-Windows box. The discovery helper
+`is_win32_available()` gates on `sys.platform == "win32"`
+(default branch) and accepts an injectable `available=`
+callable so tests don't have to mutate the process-wide
+`sys.platform` global.
+
+The factory `build_win32_screen()` accepts injectable
+`capture=` / `size=` / `available=` callables; tests feed
+in synthetic BGRX buffers and a fake screen size and walk
+the real `_bgrx_to_grid()` downsample path end-to-end
+without a real Windows desktop. The integration tests
+also exercise the `_BACKEND_FACTORIES` dispatch and the
+`paw-zoom --screen --backend win32` CLI path: on a
+non-Windows box the factory returns `None` and the CLI
+prints the same friendly "not yet implemented on this OS"
+message the X11 stub used to print, then exits 1.
+
+**Why.** v0.2 (two ticks ago) shipped the `ScreenCapture`
+protocol and the `FakeScreen` reference. The X11 / Win32 /
+Quartz stubs were the next three ticks. The X11 adapter
+landed yesterday. This is the second of the three: the
+Win32 GDI adapter. The v0.2 pipeline (`--screen`,
+`--region`, `--backend`, `--fake-grid`, `--list-backends`,
+`--json`) is unchanged — the adapter slots in behind the
+same protocol, and on a Windows desktop
+`paw-zoom --screen --backend win32` now actually captures
+pixels instead of printing "not yet implemented".
+
+**The one design call worth flagging.** I picked GDI over
+DXGI / Windows.Graphics.Capture. The newer APIs are faster
+and avoid GDI's mouse-cursor / window-decoration quirks,
+but they need a `RoGetActivationFactory` COM shim, an
+`IInitializeWithWindow::Initialize` call, and either a COM
+apartment or a packaged-app identity — easily 4× the code
+for a screen magnifier that the user is going to be looking
+at slowly. GDI works on every Windows version since 95,
+which is the accessibility-first guarantee the project
+makes, and the ctypes call surface is small enough to
+audit in one read.
+
+**Bookkeeping.** No static completion files needed
+regenerating — the four shipped files are still
+byte-identical to the live renderer output, because the
+backend names and CLI flags didn't change, only the
+backend that satisfies `--backend win32`.
+
+**Total: 423/423 green** (30 new + 393 existing). Pure
+stdlib (`ctypes` is in the stdlib since 2.5), no new pip
+deps, no telemetry, no network. The Quartz adapter is the
+last of the three stubbed OS adapters — a `screencapture`
+shelling adapter (like X11) or a small `CoreGraphics`
+ctypes call (like Win32). Either is ~100 lines and one tick.

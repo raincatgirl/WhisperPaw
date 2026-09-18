@@ -351,9 +351,15 @@ def _x11_capture() -> ScreenCapture | None:
 def _win32_capture() -> ScreenCapture | None:
     """Return a real Win32 GDI adapter if one can be constructed.
 
-    Stub today; the Win32 adapter is the tick after the X11 one.
+    Lazy-imports the adapter module so ``whisperpaw._screen``
+    itself stays importable on platforms that don't have the
+    ``gdi32`` / ``user32`` DLLs available. The
+    :func:`whisperpaw._win32.build_win32_screen` factory
+    returns ``None`` on non-Windows platforms — the common
+    case on a Linux / macOS dev box.
     """
-    return None
+    from whisperpaw import _win32
+    return _win32.build_win32_screen()
 
 
 def _quartz_capture() -> ScreenCapture | None:

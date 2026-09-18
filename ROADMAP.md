@@ -316,6 +316,7 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-17 — paw-zoom: add --max-frames N flag. Caps the --live loop at N iterations (default: 0 = unlimited) so scripts can bound the run on a quiet source. Counts iterations, not emitted frames. 10 new tests, 298/298 green. Static completion files regenerated.
 - 2026-09-17 — paw-zoom v0.2: ship the screen-capture adapter skeleton. New `whisperpaw._screen` module with a `ScreenCapture` ABC (two methods: `screen_size()` + `capture(x,y,w,h) -> list[str]`), a `FakeScreen` reference implementation, and a `get_capture()` factory. CLI gains `--screen` / `--region X,Y,W,H` / `--backend {auto,fake,x11,win32,quartz}` / `--fake-grid` / `--list-backends` / `--json`. The OS-specific adapters ship as stubs that return None with a friendly "not yet implemented on this OS" message; the v0.1 pipeline (text-source magnifier, --live, --follow, --max-frames, --snapshot) is unchanged. 52 new tests, 350/350 green. Static completion files regenerated.
 - 2026-09-17 — paw-zoom v0.2: ship a real X11 adapter. New `whisperpaw._x11` module with `X11Screen(ScreenCapture)` that shells out to `xwd -root -silent -out -`, parses the 56-byte XWD header (both LE and BE supported), and downsamples the raw BGR/BGRX pixel data to a 5-character density grid. `is_x11_available()` checks `$DISPLAY` + `xwd` on `$PATH`; `build_x11_screen()` returns None on a headless box and a real instance on a Linux desktop. The subprocess runner and discovery checks are injectable so tests don't need a real X server. Wired into `whisperpaw._screen._x11_capture`; on a real Linux desktop `paw-zoom --screen --backend x11` now actually captures pixels instead of printing "not yet implemented". 43 new tests, 393/393 green. Static completion files unchanged.
+- 2026-09-18 — paw-zoom v0.2: ship a real Win32 GDI adapter. New `whisperpaw._win32` module with `Win32Screen(ScreenCapture)` that does the full GetDC / CreateCompatibleDC / CreateCompatibleBitmap / BitBlt / GetDIBits dance via `ctypes` (pure stdlib, no third-party deps) and downsamples the resulting 32-bpp BGRX buffer to the same 5-character density grid as X11. `_default_capture` and `_default_screen_size` lazy-import `ctypes` and the `gdi32` / `user32` DLLs only when actually capturing, so the module stays importable on every platform; `is_win32_available()` gates on `sys.platform == "win32"`. The capture / size / availability callables are injectable so tests synthesise BGRX buffers in memory and feed them through the real `_bgrx_to_grid` downsample path without needing a real Windows desktop. Wired into `whisperpaw._screen._win32_capture`; on a Windows machine `paw-zoom --screen --backend win32` now actually captures pixels instead of printing "not yet implemented". 30 new tests, 423/423 green. Static completion files unchanged.
 <!-- TICK-LOG-END -->
 
 (Updated 2026-09-17: `paw-zoom` v0.2 ships the screen-capture
@@ -335,6 +336,19 @@ LE/BE `_parse_xwd_header` helper. On a real Linux desktop
 `paw-zoom --screen --backend x11` now actually captures pixels
 (using `xwd -root -silent -out -`); on a headless box the
 factory returns `None` and the CLI prints the friendly
-"not yet implemented on this OS" message. The Win32 and Quartz
-adapters are the next two ticks, each a self-contained
-~100-line module that drops into `_BACKEND_FACTORIES`.)
+"not yet implemented on this OS" message.
+
+Updated 2026-09-18: the Win32 GDI adapter is shipped.
+New `whisperpaw._win32` module with `Win32Screen(ScreenCapture)`,
+`is_win32_available()`, `build_win32_screen()`, the pure
+`_bgrx_to_grid()` downsample helper, and the
+`GetDC / CreateCompatibleDC / CreateCompatibleBitmap / BitBlt
+/ GetDIBits` ctypes pipeline that turns a screen region into
+a 32-bpp BGRX buffer (lazy-imported on first capture so the
+module is importable on every platform). On a real Windows
+desktop `paw-zoom --screen --backend win32` now actually
+captures pixels; on every other platform the factory returns
+`None` and the CLI prints the friendly "not yet implemented
+on this OS" message. The Quartz adapter is the next tick,
+again a self-contained ~100-line module that drops into
+`_BACKEND_FACTORIES`.)
