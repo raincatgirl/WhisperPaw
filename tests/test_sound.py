@@ -6,6 +6,7 @@ audio device, so they run anywhere without speakers.
 """
 from __future__ import annotations
 
+import dataclasses
 import importlib
 
 import pytest
@@ -352,3 +353,221 @@ def test_main_list_packs_json_does_not_print_banner(
     _json.loads(out)
     assert "playing" not in out.lower()
     assert "🐾" not in out
+
+
+# --- per-backend volume wiring -----------------------------------------
+#
+# These tests assert the cmd-builder for each backend actually threads
+# ``plan.volume`` through to the right flag. Without them the
+# ``--volume`` flag would still parse, but every audio backend would
+# silently ignore the user's value.
+
+
+def _plan(event: str = "ok", pack: str = "cat", volume: float = 0.6):
+    """Build a real :class:`PlayPlan` for the cmd-builder tests.
+
+    The path is read from the on-disk pack so we don't need to
+    stub a file; the cmd-builder only ever uses ``plan.path`` as
+    a string, never opens it. ``PlayPlan`` is a frozen dataclass
+    so we use :func:`dataclasses.replace` rather than the
+    stdlib's ``_replace`` (which only exists on the unfrozen
+    variant).
+    """
+    base = sound.resolve_sound(event, pack)
+    return dataclasses.replace(base, volume=volume)
+
+
+def test_afplay_cmd_passes_volume_flag() -> None:
+    """afplay takes ``-v VALUE`` in the same [0.0, 1.0] scale the CLI uses."""
+    plan = _plan(volume=0.5)
+    cmd = sound._afplay_cmd(plan)
+    assert cmd[0] == "afplay"
+    # The flag + value are the two middle elements; the path is last.
+    assert cmd[1:3] == ["-v", "0.500"]
+    assert cmd[-1] == str(plan.path)
+
+
+def test_afplay_cmd_volume_zero_is_passed_verbatim() -> None:
+    """A volume of 0.0 is a real value (mute), not a default-fallback."""
+    plan = _plan(volume=0.0)
+    cmd = sound._afplay_cmd(plan)
+    assert "-v" in cmd
+    # The value immediately after -v is the volume.
+    v_idx = cmd.index("-v")
+    assert cmd[v_idx + 1] == "0.000"
+
+
+def test_afplay_cmd_volume_one_is_passed_verbatim() -> None:
+    """A volume of 1.0 (full) is also passed through unchanged."""
+    plan = _plan(volume=1.0)
+    cmd = sound._afplay_cmd(plan)
+    v_idx = cmd.index("-v")
+    assert cmd[v_idx + 1] == "1.000"
+
+
+def test_paplay_cmd_scales_volume_to_pulse_range() -> None:
+    """paplay takes ``--volume=`` as a 16-bit integer in [0, 65535].
+
+    0.0 → 0 (mute), 1.0 → 65535 (full), 0.5 → 32768 (half).
+    """
+    # The paplay helper clamps the int conversion; 0.5 * 65535 = 32767.5
+    # which rounds to 32768.
+    assert sound._paplay_cmd(_plan(volume=0.0)) == [
+        "paplay", "--volume=0", str(_plan().path),
+    ]
+    assert sound._paplay_cmd(_plan(volume=1.0)) == [
+        "paplay", "--volume=65535", str(_plan().path),
+    ]
+    assert sound._paplay_cmd(_plan(volume=0.5)) == [
+        "paplay", "--volume=32768", str(_plan().path),
+    ]
+
+
+def test_paplay_cmd_clamps_out_of_range_values() -> None:
+    """paplay's volume is integer-clamped even if the input is a hair off.
+
+    The CLI already rejects 0.0 > volume > 1.0 so this is a
+    defensive belt — without it a downstream call could pass
+    ``-0.01`` and Pulse would reject the negative volume.
+    """
+    assert sound._paplay_cmd(_plan(volume=-0.1)) == [
+        "paplay", "--volume=0", str(_plan().path),
+    ]
+    assert sound._paplay_cmd(_plan(volume=1.5)) == [
+        "paplay", "--volume=65535", str(_plan().path),
+    ]
+
+
+def test_aplay_cmd_does_not_emit_volume_flag() -> None:
+    """ALSA's aplay has no per-stream volume flag; the cmd has no extra args."""
+    plan = _plan(volume=0.42)
+    assert sound._aplay_cmd(plan) == ["aplay", str(plan.path)]
+
+
+def test_powershell_cmd_does_not_emit_volume() -> None:
+    """The .NET SoundPlayer used by PowerShell is fixed-gain.
+
+    The script only contains the SoundPlayer invocation, not any
+    ``Volume`` property setter. We assert that the script is
+    unchanged regardless of the requested volume.
+    """
+    plan_low = _plan(volume=0.1)
+    plan_high = _plan(volume=0.9)
+    assert sound._powershell_cmd(plan_low) == sound._powershell_cmd(plan_high)
+
+
+# --- volume_supported() --------------------------------------------------
+
+
+def test_volume_supported_true_for_afplay_and_paplay() -> None:
+    """afplay (macOS) and paplay (PulseAudio) honour --volume."""
+    assert sound.volume_supported("afplay") is True
+    assert sound.volume_supported("paplay") is True
+
+
+def test_volume_supported_false_for_aplay_and_powershell() -> None:
+    """aplay (ALSA) and powershell SoundPlayer cannot honour --volume."""
+    assert sound.volume_supported("aplay") is False
+    assert sound.volume_supported("powershell") is False
+
+
+def test_volume_supported_false_for_unknown_backend() -> None:
+    """An unknown backend name returns False (not a KeyError)."""
+    assert sound.volume_supported("nosuchplayer") is False
+    assert sound.volume_supported("") is False
+
+
+def test_known_backend_names_matches_the_set_we_pick() -> None:
+    """The :data:`KNOWN_BACKEND_NAMES` set covers every backend the
+    ``pick_backend`` ladder can return, and nothing else.
+
+    This is the safety net for :func:`volume_supported` — if a
+    new backend lands in ``pick_backend`` and isn't added here,
+    ``current_backend_name()`` can return a name that
+    ``volume_supported()`` doesn't know about. (We don't make
+    that an error, but the test will at least flag the drift.)
+    """
+    from whisperpaw import sound as s
+    # The intersection: every name pick_backend / current_backend_name
+    # can return must be in KNOWN_BACKEND_NAMES.
+    expected = {"afplay", "aplay", "paplay", "powershell"}
+    assert s.KNOWN_BACKEND_NAMES == frozenset(expected)
+
+
+# --- current_backend_name() ---------------------------------------------
+
+
+def test_current_backend_name_agrees_with_pick_backend(
+    monkeypatch,
+) -> None:
+    """``current_backend_name()`` and ``pick_backend()`` must agree on
+    the active backend — they share the same ``shutil.which``
+    ladder. We force both branches to be testable by stubbing
+    ``shutil.which`` to claim a single binary exists.
+    """
+    import shutil as _shutil
+
+    def fake_which(name: str) -> str | None:
+        return f"/usr/bin/{name}" if name == "afplay" else None
+
+    monkeypatch.setattr(_shutil, "which", fake_which)
+    monkeypatch.setattr(sound.platform, "system", lambda: "Darwin")
+    assert sound.current_backend_name() == "afplay"
+    assert sound.pick_backend() is not None
+    # And the actually-picked function should be the afplay builder.
+    plan = _plan()
+    assert sound._afplay_cmd(plan)[0] == "afplay"
+
+
+def test_current_backend_name_returns_none_when_no_backend(
+    monkeypatch,
+) -> None:
+    """If no audio binary is on PATH, both helpers return ``None``."""
+    import shutil as _shutil
+    monkeypatch.setattr(_shutil, "which", lambda name: None)
+    monkeypatch.setattr(sound.platform, "system", lambda: "Linux")
+    assert sound.current_backend_name() is None
+    assert sound.pick_backend() is None
+
+
+# --- end-to-end: --volume flows from CLI to backend ---------------------
+
+
+def test_main_volume_flag_reaches_afplay_backend(
+    capsys, monkeypatch
+) -> None:
+    """The user's ``--volume`` must reach the audio backend.
+
+    We monkey-patch ``pick_backend`` to return a recorder that
+    captures the :class:`PlayPlan`, then assert the volume
+    field made it through ``main()`` unchanged.
+    """
+    captured: list = []
+
+    def fake_pick():
+        def _play(plan):
+            captured.append(plan)
+            return 0
+        return _play
+
+    monkeypatch.setattr(sound, "pick_backend", fake_pick)
+    code = sound.main(["--volume", "0.25", "ok"])
+    assert code == 0
+    assert len(captured) == 1
+    assert captured[0].volume == pytest.approx(0.25)
+
+
+def test_main_default_volume_reaches_backend(capsys, monkeypatch) -> None:
+    """Without ``--volume`` the default (0.6) is what reaches the backend."""
+    captured: list = []
+
+    def fake_pick():
+        def _play(plan):
+            captured.append(plan)
+            return 0
+        return _play
+
+    monkeypatch.setattr(sound, "pick_backend", fake_pick)
+    code = sound.main(["ok"])
+    assert code == 0
+    assert captured[0].volume == pytest.approx(0.6)

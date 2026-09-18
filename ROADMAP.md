@@ -39,6 +39,24 @@ Legend: 🐣 planned · 🛠 in progress · ✅ shipped · 🐛 buggy
 - Audio backends: ``afplay`` (macOS) → ``paplay`` → ``aplay`` → PowerShell
   ``SoundPlayer`` (Windows). Graceful "no backend" message + exit 1
   if none are available.
+- **Per-backend volume wiring**: ``--volume`` is now actually honoured
+  on the backends that support a per-stream knob. ``afplay`` takes
+  ``-v VALUE`` in the same [0.0, 1.0] scale the CLI uses
+  (pass-through). ``paplay`` takes ``--volume=N`` as a 16-bit unsigned
+  integer in [0, 65535]; the linear [0.0, 1.0] CLI value is scaled
+  via ``int(round(v * 65535))`` and clamped on the (defensive) off
+  chance a value is slightly out of range. ``aplay`` (ALSA) and
+  PowerShell ``SoundPlayer`` cannot honour per-stream volume without
+  side effects (aplay would need a separate ``amixer`` call; the .NET
+  SoundPlayer is fixed-gain), so the value is silently dropped on
+  those backends. The runtime check lives in
+  :func:`whisperpaw.sound.volume_supported` and the live backend
+  name lives in :func:`whisperpaw.sound.current_backend_name`
+  (returns one of ``"afplay"`` / ``"aplay"`` / ``"paplay"`` /
+  ``"powershell"`` or ``None``). Both are pure functions, testable
+  without an audio device, and derive from the same
+  ``shutil.which`` ladder :func:`pick_backend` uses so they cannot
+  drift.
 - Discovery flags: ``--list-packs`` and ``--list-events`` print the
   available pack / event names, one per line, and exit 0 without
   touching the audio device. They are mutually exclusive with
@@ -318,6 +336,7 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-17 — paw-zoom v0.2: ship a real X11 adapter. New `whisperpaw._x11` module with `X11Screen(ScreenCapture)` that shells out to `xwd -root -silent -out -`, parses the 56-byte XWD header (both LE and BE supported), and downsamples the raw BGR/BGRX pixel data to a 5-character density grid. `is_x11_available()` checks `$DISPLAY` + `xwd` on `$PATH`; `build_x11_screen()` returns None on a headless box and a real instance on a Linux desktop. The subprocess runner and discovery checks are injectable so tests don't need a real X server. Wired into `whisperpaw._screen._x11_capture`; on a real Linux desktop `paw-zoom --screen --backend x11` now actually captures pixels instead of printing "not yet implemented". 43 new tests, 393/393 green. Static completion files unchanged.
 - 2026-09-18 — paw-zoom v0.2: ship a real Win32 GDI adapter. New `whisperpaw._win32` module with `Win32Screen(ScreenCapture)` that does the full GetDC / CreateCompatibleDC / CreateCompatibleBitmap / BitBlt / GetDIBits dance via `ctypes` (pure stdlib, no third-party deps) and downsamples the resulting 32-bpp BGRX buffer to the same 5-character density grid as X11. `_default_capture` and `_default_screen_size` lazy-import `ctypes` and the `gdi32` / `user32` DLLs only when actually capturing, so the module stays importable on every platform; `is_win32_available()` gates on `sys.platform == "win32"`. The capture / size / availability callables are injectable so tests synthesise BGRX buffers in memory and feed them through the real `_bgrx_to_grid` downsample path without needing a real Windows desktop. Wired into `whisperpaw._screen._win32_capture`; on a Windows machine `paw-zoom --screen --backend win32` now actually captures pixels instead of printing "not yet implemented". 30 new tests, 423/423 green. Static completion files unchanged.
 - 2026-09-18 — paw-zoom v0.2: ship a real Quartz adapter. New `whisperpaw._quartz` module with `QuartzScreen(ScreenCapture)` that shells out to `screencapture -x -R x,y,w,h -t tiff -` (pure stdlib, no PyObjC, no third-party deps), parses the resulting little-endian TIFF (32-bpp RGBA, no compression, RGB photometric) to find the pixel strip, and downsamples the top-down RGBA buffer to the same 5-character density grid as X11 / Win32. `_default_runner` is the real `subprocess.run` plumbing; the runner, env, and which() are all injectable so tests synthesise minimal TIFF bitstreams in memory and feed them through the real `_parse_tiff_header` and `_rgba_to_grid` paths without needing a real Mac. `is_quartz_available()` gates on `sys.platform == "darwin"` + `shutil.which("screencapture")`; `_parse_tiff_header` rejects any non-32-bpp-RGBA / compressed / palette-based image with a clear `RuntimeError` rather than silently mis-rendering. Wired into `whisperpaw._screen._quartz_capture`; on a macOS machine `paw-zoom --screen --backend quartz` now actually captures pixels instead of printing "not yet implemented". 45 new tests, 468/468 green. Static completion files unchanged.
+- 2026-09-18 — paw-sound: wire --volume to the per-stream-capable audio backends. afplay now takes `-v VALUE` (pass-through in [0.0, 1.0]); paplay takes `--volume=N` scaled to a 16-bit unsigned int in [0, 65535] via int(round(v * 65535)) with defensive clamp. aplay (ALSA) and PowerShell SoundPlayer silently drop the value because they have no per-stream knob (aplay would need a separate `amixer` call; SoundPlayer is fixed-gain). New public `volume_supported(backend_name)` + `current_backend_name()` helpers (pure, derive from the same `shutil.which` ladder as `pick_backend` so they cannot drift). `--help` text expanded to call out which backends honour the flag. 15 new tests, 483/483 green. Static completion files unchanged (flag already shipped; only the help text expanded).
 <!-- TICK-LOG-END -->
 
 (Updated 2026-09-17: `paw-zoom` v0.2 ships the screen-capture
@@ -366,7 +385,27 @@ the module is importable on every platform). On a real macOS
 machine `paw-zoom --screen --backend quartz` now actually
 captures pixels; on every other platform the factory returns
 `None` and the CLI prints the friendly "not yet implemented
-on this OS" message. All three v0.2 OS adapters (X11 / Win32
-/ Quartz) are now real — the v0.2 line is done; the only
-remaining gap is the FakeScreen test coverage for the
-end-to-end v0.2 pipeline, which lands in a follow-up tick.)
+on this OS" message. All three v0.2 OS adapters (X11 / Win32 /
+Quartz) are now real — the v0.2 line is done.
+
+Updated 2026-09-18 (later still): `paw-sound --volume` is no
+longer a no-op. The CLI accepted and validated the value but
+every cmd-builder silently ignored it; the user's gain
+request was dropped on the floor. afplay now takes
+`-v VALUE` in the same [0.0, 1.0] scale the CLI uses
+(pass-through, formatted to 3 decimal places for stable
+snapshot tests). paplay now takes `--volume=N` as a 16-bit
+unsigned int in [0, 65535] scaled from the CLI value via
+`int(round(v * 65535))` with a defensive clamp. aplay (ALSA)
+and PowerShell SoundPlayer silently drop the value because
+neither supports per-stream volume without side effects
+(aplay would need a separate `amixer` call; SoundPlayer is
+fixed-gain). New public helpers: `volume_supported(name)` —
+the runtime check for "does this backend honour the flag" —
+and `current_backend_name()` — the live backend name, derived
+from the same `shutil.which` ladder `pick_backend` uses so
+the two cannot drift. `KNOWN_BACKEND_NAMES` (the canonical
+set of names) is exported and pinned by a test so a new
+backend added in one place can't silently drift from the
+other. The `--help` text for `--volume` is expanded to spell
+out which backends honour the flag.

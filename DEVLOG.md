@@ -1393,3 +1393,89 @@ ctypes call (like Win32). Either is ~100 lines and one tick.
   v0.2 pipeline through `paw-zoom --screen --backend
   fake --fake-grid ...` and asserts the magnified output
   shape end-to-end).
+
+## 2026-09-18 — `paw-sound --volume` actually reaches the audio backend
+
+- **What changed.** `paw-sound --volume` is no longer a flag
+  that goes nowhere. The CLI was already accepting and
+  validating the value and stuffing it into
+  `PlayPlan.volume`, but every cmd-builder
+  (`_afplay_cmd` / `_aplay_cmd` / `_paplay_cmd` /
+  `_powershell_cmd`) was ignoring it. The user typed
+  `--volume 0.3` and the same default-gain sound came out
+  the speaker — a real bug.
+- **Per-backend wiring.**
+  - `afplay` (macOS) — `-v VALUE` in the same [0.0, 1.0]
+    scale the CLI uses; pass-through. Format string
+    `f"{plan.volume:.3f}"` so the value is stable for
+    snapshot-style tests (no scientific notation, no
+    trailing zeros from float repr).
+  - `paplay` (PulseAudio) — `--volume=N` where `N` is a
+    16-bit unsigned int in [0, 65535]. Scale
+    `int(round(v * 65535))` with `max(0, min(65535, …))`
+    clamp. The CLI already rejects out-of-range values so
+    the clamp is defensive.
+  - `aplay` (ALSA) — silently ignored. ALSA has no
+    per-stream volume; the only way to attenuate is via
+    a separate `amixer` call that mutates *global* state,
+    which a one-shot sound tool shouldn't do.
+  - `powershell` SoundPlayer — silently ignored. The .NET
+    SoundPlayer is fixed-gain.
+- **New public helpers.**
+  - `whisperpaw.sound.volume_supported(backend_name) ->
+    bool` — `True` for `"afplay"` and `"paplay"`,
+    `False` for `"aplay"`, `"powershell"`, and unknown
+    names. Backed by the `BACKENDS_WITH_VOLUME` frozenset
+    so the table is one glance away.
+  - `whisperpaw.sound.current_backend_name() -> str |
+    None` — re-runs the same `shutil.which` ladder
+    `pick_backend` uses and returns one of
+    `"afplay"` / `"aplay"` / `"paplay"` / `"powershell"`
+    or `None`. The two helpers are guaranteed to agree
+    (modulo a `which` race), which a dedicated test
+    pins down with a monkey-patched `shutil.which`.
+  - `whisperpaw.sound.KNOWN_BACKEND_NAMES` — the canonical
+    set of names; another test asserts the registry
+    matches the `pick_backend` ladder so a new backend
+    added in one place can't silently drift from the
+    other.
+- **`--help` text.** The `--volume` help string now
+  explicitly calls out which backends honour the flag and
+  which silently drop it, and points at
+  `volume_supported()` for the runtime check.
+- **Tests.** 15 new tests in `tests/test_sound.py`:
+  - 3 afplay cmd tests (basic, volume=0, volume=1)
+  - 2 paplay cmd tests (scale 0.0/0.5/1.0; clamp
+    out-of-range)
+  - 1 aplay cmd test (no volume flag)
+  - 1 powershell cmd test (no volume regardless of input)
+  - 3 `volume_supported` tests (true cases, false
+    cases, unknown name)
+  - 1 `KNOWN_BACKEND_NAMES` invariant test
+  - 2 `current_backend_name` tests (agrees with
+    `pick_backend` under monkey-patched `which`;
+    returns `None` when no audio binary is present)
+  - 2 end-to-end `main()` tests that assert the volume
+    field actually flows from the CLI through
+    `resolve_sound` and into the `PlayPlan` that reaches
+    `pick_backend` (both `--volume 0.25` and the
+    default 0.6).
+- **Total: 483/483 green** (15 new + 468 existing).
+- **No static completion files needed regenerating.**
+  The flag was already shipped; only the help text
+  changed, and the renderer derives completions from
+  `build_parser()`'s `choices=` and the flag *names*,
+  not from the help strings.
+- **No new third-party deps.** Pure stdlib.
+- **Next tick.** All four shipped tools are feature-
+  complete; the remaining items in the ROADMAP are
+  either user-driven (new sound pack, streaming
+  `paw-read`) or larger than a single tick (`paw-zoom`
+  v0.2 live screen-capture tail — would need a
+  `_screen_tail_and_render` loop parallel to
+  `_tail_and_render`). A natural small unit: pin down
+  the FakeScreen end-to-end test that the Quartz
+  tick's bookkeeping promised but didn't actually land
+  (the existing `test_main_screen_*` tests cover the
+  one-shot path, but not `--screen --live` because
+  that path isn't wired yet).

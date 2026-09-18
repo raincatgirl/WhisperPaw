@@ -138,7 +138,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--volume",
         type=float,
         default=0.6,
-        help="Playback volume, 0.0–1.0 (default: 0.6).",
+        help=(
+            "Playback volume, 0.0–1.0 (default: 0.6). Honoured on "
+            "afplay (macOS) and paplay (PulseAudio). Silently "
+            "ignored on aplay (ALSA, no per-stream volume) and on "
+            "PowerShell SoundPlayer (fixed gain); see "
+            "volume_supported() in the module for the runtime "
+            "check."
+        ),
     )
     parser.add_argument(
         "--quiet",
@@ -234,26 +241,71 @@ def resolve_sound(
 
 
 def _afplay_cmd(plan: PlayPlan) -> list[str]:
-    return ["afplay", str(plan.path)]
+    # afplay's ``-v`` flag is a linear gain in [0.0, 1.0] — the same
+    # scale :class:`PlayPlan.volume` already uses, so we pass the
+    # value through unchanged. The flag is positional-value (``-v
+    # 0.5``), not ``-v=0.5``; the manual style is portable to
+    # every afplay version that ships on a current macOS.
+    return ["afplay", "-v", f"{plan.volume:.3f}", str(plan.path)]
 
 
 def _aplay_cmd(plan: PlayPlan) -> list[str]:
+    # ALSA's ``aplay`` has no per-stream volume flag — the only way
+    # to attenuate is via a separate ``amixer`` call against the
+    # default PCM control, which mutates global state. We
+    # deliberately don't shell out: a single ``paw-sound`` shouldn't
+    # surprise the user by changing their system volume. Volume is
+    # therefore not honoured on aplay; see ``volume_supported``.
     return ["aplay", str(plan.path)]
 
 
 def _paplay_cmd(plan: PlayPlan) -> list[str]:
-    return ["paplay", str(plan.path)]
+    # PulseAudio's ``paplay --volume=`` takes a 16-bit unsigned
+    # integer in [0, 65535] where 65535 == 100% and 0 == mute.
+    # We scale the linear [0.0, 1.0] PlayPlan.volume up by 65535
+    # and clamp on the off-chance the value is slightly out of
+    # range (the CLI already validates 0.0–1.0 so this is
+    # defensive). Pulse uses ``=`` rather than space between the
+    # flag and the value; that's the canonical form in
+    # ``paplay --help``.
+    pa_volume = max(0, min(65535, int(round(plan.volume * 65535))))
+    return ["paplay", f"--volume={pa_volume}", str(plan.path)]
 
 
 def _powershell_cmd(plan: PlayPlan) -> list[str]:
     # Use the .NET SoundPlayer — works on every Windows since XP without
-    # extra dependencies. Volume is not honoured by SoundPlayer.
+    # extra dependencies. Volume is not honoured by SoundPlayer; see
+    # ``volume_supported``.
     script = (
         "(New-Object Media.SoundPlayer '"
         + str(plan.path).replace("'", "''")
         + "').PlaySync()"
     )
     return ["powershell", "-NoProfile", "-Command", script]
+
+
+#: Backend names that can be returned by :func:`current_backend_name`
+#: and accepted by :func:`volume_supported`. Kept in sync with the
+#: command names used by :func:`pick_backend` below.
+KNOWN_BACKEND_NAMES: frozenset[str] = frozenset(
+    {"afplay", "aplay", "paplay", "powershell"}
+)
+
+#: Backend names whose underlying player supports a per-stream
+#: volume flag. ``aplay`` and ``powershell`` are absent because
+#: neither exposes a per-stream volume knob without side effects
+#: (aplay would need a separate ``amixer`` call; powershell
+#: SoundPlayer is fixed-gain).
+BACKENDS_WITH_VOLUME: frozenset[str] = frozenset({"afplay", "paplay"})
+
+
+def volume_supported(backend_name: str) -> bool:
+    """Return ``True`` if the given backend honours ``--volume``.
+
+    The CLI uses this to decide whether to mention the limitation
+    in ``--help`` text; tests use it to assert the contract.
+    """
+    return backend_name in BACKENDS_WITH_VOLUME
 
 
 def pick_backend() -> Callable[[PlayPlan], int] | None:
@@ -272,6 +324,33 @@ def pick_backend() -> Callable[[PlayPlan], int] | None:
         return _run_subprocess(_paplay_cmd)
     if shutil.which("aplay"):
         return _run_subprocess(_aplay_cmd)
+    return None
+
+
+def current_backend_name() -> str | None:
+    """Return the name of the audio backend that :func:`pick_backend` would
+    pick on this machine, or ``None`` if none is available.
+
+    The string is one of :data:`KNOWN_BACKEND_NAMES` (``"afplay"``,
+    ``"aplay"``, ``"paplay"``, ``"powershell"``) so callers can
+    index into :data:`BACKENDS_WITH_VOLUME` or compare against the
+    per-OS lookup table. The name is derived by re-running the
+    same ``shutil.which`` checks :func:`pick_backend` does; the
+    two are guaranteed to agree (modulo a race where the binary
+    is uninstalled between the two calls, which is not realistic
+    in practice).
+    """
+    system = platform.system()
+    if system == "Darwin" and shutil.which("afplay"):
+        return "afplay"
+    if system == "Windows":
+        if shutil.which("powershell"):
+            return "powershell"
+        return None
+    if shutil.which("paplay"):
+        return "paplay"
+    if shutil.which("aplay"):
+        return "aplay"
     return None
 
 
