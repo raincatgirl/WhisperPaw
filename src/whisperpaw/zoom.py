@@ -414,6 +414,165 @@ def _tail_and_render(
     return 0
 
 
+def _tail_screen_and_render(
+    cap: _screen.ScreenCapture,
+    cfg: ZoomConfig,
+    *,
+    region: str | None = None,
+    interval: float,
+    follow: bool = False,
+    max_frames: int = 0,
+    stop_predicate=None,
+    clock=None,
+    sink=None,
+    capture_fn=None,
+    has_changed=None,
+) -> int:
+    """Follow a screen-capture adapter and re-render the magnified
+    viewport on every change.
+
+    The screen-tail mirror of :func:`_tail_and_render`: instead of
+    re-reading a file, this re-runs :func:`whisperpaw._screen.
+    capture_screen_to_source` against ``cap`` on every poll. The
+    captured ``str`` is then handed to the same
+    :func:`render_viewport` the text-source path uses, so the
+    magnification math, the padding, the ``--follow`` offset
+    derivation, and the ``--snapshot`` / sink plumbing are shared
+    with the text-source path with zero duplication.
+
+    Loops until ``stop_predicate()`` returns truthy (or forever, if
+    not given). On every iteration:
+
+    1. Re-capture the screen (``capture_fn()`` or, by default,
+       :func:`_screen.capture_screen_to_source` over ``region``).
+    2. If the captured text differs from the previous iteration
+       (``has_changed(prev, current)`` — defaults to ``!=``), call
+       :func:`render_viewport` and push the result through
+       ``sink`` (defaults to stdout with a blank-line separator,
+       same as the text-source tail).
+    3. Sleep ``interval`` seconds using ``clock()`` (defaults to
+       :func:`time.sleep`; tests pass a no-op clock).
+
+    The ``capture_fn`` and ``has_changed`` injection points exist
+    so the tests can run the entire pipeline against a
+    :class:`whisperpaw._screen.FakeScreen` whose grid is mutated
+    between iterations, without touching the real screen. Real
+    OS adapters (X11 / Win32 / Quartz) use the defaults — the
+    string-diff change detector naturally fires whenever the
+    captured text grid changes (e.g. a new console prompt
+    appears), and a totally static screen yields exactly one
+    frame, the same way a totally static file does in the
+    text-source path.
+
+    When ``follow`` is true, each frame's ``row_offset`` is
+    recomputed from the captured source so the *last*
+    ``cfg.rows`` lines are in view (tail semantics). The
+    frozen config is left untouched; the per-frame offset is a
+    derived value that lives only inside this function.
+
+    When ``max_frames`` is positive, the loop runs at most that
+    many *iterations* (not emitted frames) before exiting — same
+    semantics as :func:`_tail_and_render`. ``0`` (the default)
+    means no cap.
+
+    Returns ``0`` on a clean exit. Capture errors
+    (``RuntimeError`` / ``ValueError`` from the adapter or the
+    region parser) are surfaced as a single stderr line and the
+    loop continues — a transient adapter failure shouldn't kill
+    a screen magnifier that's been running for hours.
+
+    Note: this is the **screen-capture** tail. It is not the
+    same as :func:`_tail_and_render` (which tails a file). The
+    two functions are deliberately separate so each one stays
+    small, single-purpose, and independently testable; the only
+    thing they share is the loop shape.
+    """
+    sleep = clock if clock is not None else time.sleep
+    # Default capture_fn: re-capture the screen adapter each poll.
+    # Named ``_do_capture`` so we don't shadow the kwarg name.
+    if capture_fn is None:
+
+        def _do_capture() -> str:
+            return _screen.capture_screen_to_source(cap, region=region)
+
+        actual_capture = _do_capture
+    else:
+        actual_capture = capture_fn
+
+    # Default change detector: string inequality. ``prev`` may be
+    # ``None`` on the very first iteration (no previous frame
+    # exists), in which case we *always* render the first frame.
+    if has_changed is None:
+
+        def _default_changed(prev: str | None, cur: str) -> bool:
+            return prev != cur
+
+        actual_changed = _default_changed
+    else:
+        actual_changed = has_changed
+
+    last_text: str | None = None
+    max_iters = max_frames if max_frames > 0 else None
+    iter_count = 0
+    while stop_predicate is None or not stop_predicate():
+        if max_iters is not None and iter_count >= max_iters:
+            break
+        iter_count += 1
+        try:
+            text = actual_capture()
+        except ValueError as exc:
+            # Region / grid shape errors from the adapter.
+            print(
+                f"paw-zoom: --screen capture failed: {exc}",
+                file=sys.stderr,
+            )
+            sleep(interval)
+            continue
+        except RuntimeError as exc:
+            # Adapter-level failures (e.g. region parser, capture
+            # pipeline). Treat as transient and keep looping.
+            print(
+                f"paw-zoom: --screen capture failed: {exc}",
+                file=sys.stderr,
+            )
+            sleep(interval)
+            continue
+        # Change detection. The default ``!=`` is exact for a
+        # text-grid capture (FakeScreen, a logged console, a
+        # piped view of a text mode). Real OS adapters
+        # (X11 / Win32 / Quartz) feed this same string through
+        # their own pixel-to-text grid, and any visible change
+        # will surface as a string diff. A perfectly static
+        # screen yields exactly one frame — the same way a
+        # perfectly static file does in the text-source path.
+        if not actual_changed(last_text, text):
+            sleep(interval)
+            continue
+        last_text = text
+        # In --follow mode the row_offset is derived from the
+        # captured source's current size on every frame, so the
+        # viewport tracks the tail of the screen as it grows.
+        # We rebuild a per-frame cfg instead of mutating the
+        # caller's (frozen) config.
+        frame_cfg = cfg
+        if follow:
+            frame_cfg = dataclasses.replace(
+                cfg, row_offset=_tail_offset(text, cfg.rows)
+            )
+        rendered = render_viewport(text, frame_cfg)
+        if sink is not None:
+            sink(rendered)
+        else:
+            sys.stdout.write(rendered)
+            # Frame separator. A blank line keeps successive
+            # frames visually distinct in scrollback, same as
+            # the text-source tail.
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        sleep(interval)
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
@@ -514,9 +673,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--live",
         action="store_true",
         help=(
-            "Follow --file PATH like 'tail -f': re-render the magnified "
-            "viewport every time the source changes. Implies --file. "
-            "Press Ctrl-C to stop. The poll interval is --interval "
+            "Follow the source like 'tail -f': re-render the magnified "
+            "viewport every time it changes. With --file PATH this is a "
+            "text-source tail (mtime-tracked). With --screen this is a "
+            "screen-capture tail (re-captures on every poll). Press "
+            "Ctrl-C to stop. The poll interval is --interval "
             f"(default: {DEFAULT_LIVE_INTERVAL:g}s)."
         ),
     )
@@ -607,10 +768,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             file=sys.stderr,
         )
         raise SystemExit(2)
-    if args.live and not args.file:
+    if args.live and not args.file and not args.screen:
         print(
-            "paw-zoom: --live requires --file PATH "
-            "(there is no stdin to tail)",
+            "paw-zoom: --live requires --file PATH or --screen "
+            "(there is nothing else to tail)",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -686,6 +847,10 @@ def main(argv: list[str] | None = None) -> int:
     # becomes the source string the rest of the pipeline
     # (ZoomConfig, render_viewport, --snapshot, --live /
     # --follow / --max-frames) already understands.
+    # ``cap`` is initialised to None up-front so the live
+    # dispatch below (which also uses it when ``--screen`` is
+    # set) doesn't trip a "possibly unbound" diagnostic.
+    cap: _screen.ScreenCapture | None = None
     if args.screen:
         fake_grid: list[str] | None = None
         if args.fake_grid is not None:
@@ -767,6 +932,36 @@ def main(argv: list[str] | None = None) -> int:
                 sys.stdout.flush()
 
         try:
+            if args.screen:
+                # Screen-capture tail. The adapter was already
+                # constructed in the --screen branch above; we
+                # re-capture from it on every poll. ``cap`` is
+                # always set in this branch because
+                # ``parse_args()`` rejects ``--live`` without
+                # either ``--file`` or ``--screen``, and the
+                # source-resolution block early-returns when
+                # the screen backend is unavailable. The
+                # ``cap is not None`` guard exists as
+                # defence-in-depth (and to keep the type
+                # checker happy without an ``assert`` that
+                # would be stripped under ``python -O``).
+                if cap is None:
+                    print(
+                        "paw-zoom: --live --screen: no capture backend "
+                        "available; this should have been caught at "
+                        "source resolution",
+                        file=sys.stderr,
+                    )
+                    return 1
+                return _tail_screen_and_render(
+                    cap,
+                    cfg,
+                    region=args.region,
+                    interval=args.interval,
+                    follow=args.follow,
+                    max_frames=args.max_frames,
+                    sink=_sink,
+                )
             return _tail_and_render(
                 args.file,
                 cfg,

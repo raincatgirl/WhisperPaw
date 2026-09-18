@@ -594,3 +594,491 @@ def test_cli_shim_screen_fake_renders() -> None:
     assert result.returncode == 0
     assert "abc" in result.stdout
     assert "def" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# --screen --live (the screen-capture tail)
+# ---------------------------------------------------------------------------
+
+
+def test_main_screen_live_emits_first_frame(capsys: pytest.CaptureFixture) -> None:
+    """``--screen --live --backend fake --fake-grid ...`` emits the
+    first magnified frame on the first poll and exits cleanly when
+    --max-frames caps the loop.
+
+    This is the FakeScreen end-to-end test the v0.2 Quartz tick's
+    bookkeeping promised but didn't land: the captured screen is
+    re-rendered through the full live-tail pipeline, with
+    --max-frames bounding the run so the test doesn't loop forever.
+    """
+    rc = zoom.main(
+        [
+            "--screen",
+            "--backend",
+            "fake",
+            "--fake-grid",
+            "abc\ndef",
+            "--live",
+            "--max-frames",
+            "1",
+            "--rows",
+            "2",
+            "--cols",
+            "3",
+            "--zoom",
+            "1",
+            "--quiet",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The first frame is the captured grid at zoom 1.
+    assert "abc" in out
+    assert "def" in out
+
+
+def test_main_screen_live_without_max_frames_does_not_loop_forever(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Without --max-frames, the ``--screen --live`` loop only runs
+    for one tick in this test because we inject a clock that
+    always returns and a stop_predicate that fires after one
+    iteration. The real CLI requires Ctrl-C; this test pins the
+    plumbing path that the CLI dispatches to, by going through
+    the helper directly.
+
+    This is the end-to-end "loop shape" guarantee: the
+    :func:`whisperpaw.zoom._tail_screen_and_render` helper, when
+    called with a one-iteration stop_predicate, exits cleanly
+    with exactly one frame in the sink.
+    """
+    cap = _screen.FakeScreen(["abc", "def"])
+    cfg = zoom.ZoomConfig(rows=2, cols=3, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        return ticks["n"] >= 2
+
+    rc = zoom._tail_screen_and_render(
+        cap,
+        cfg,
+        interval=0.0,
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        sink=frames.append,
+    )
+    assert rc == 0
+    assert len(frames) == 1
+    assert "abc" in frames[0]
+    assert "def" in frames[0]
+
+
+def test_tail_screen_and_render_emits_frame_on_grid_change() -> None:
+    """If the FakeScreen's grid changes between polls, the
+    helper re-renders. This is the proof that the screen-tail
+    composition is real: a fresh ``_grid`` between iterations
+    surfaces a string-diff in the change detector and yields a
+    second frame.
+    """
+    cap = _screen.FakeScreen(["aaa", "bbb"])
+    cfg = zoom.ZoomConfig(rows=2, cols=3, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        if ticks["n"] == 2:
+            # Mutate the captured grid between polls.
+            cap._grid = ["xxx", "yyy"]  # type: ignore[attr-defined]
+        return ticks["n"] >= 3
+
+    zoom._tail_screen_and_render(
+        cap,
+        cfg,
+        interval=0.0,
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        sink=frames.append,
+    )
+    # Two distinct frames: the original "aaa/bbb" and the mutated
+    # "xxx/yyy".
+    assert len(frames) == 2
+    assert "aaa" in frames[0]
+    assert "xxx" in frames[1]
+    assert "aaa" not in frames[1]
+
+
+def test_tail_screen_and_render_skips_unchanged_polls() -> None:
+    """If the captured grid is the same across many polls, only
+    one frame is rendered. Mirrors the text-source path's
+    change-detector contract: a static screen yields exactly
+    one frame (the initial state).
+    """
+    cap = _screen.FakeScreen(["aaa", "bbb"])
+    cfg = zoom.ZoomConfig(rows=2, cols=3, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        return ticks["n"] >= 5
+
+    zoom._tail_screen_and_render(
+        cap,
+        cfg,
+        interval=0.0,
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        sink=frames.append,
+    )
+    assert len(frames) == 1
+
+
+def test_tail_screen_and_render_handles_capture_errors() -> None:
+    """If the injected ``capture_fn`` raises ``ValueError`` (region
+    shape error) or ``RuntimeError`` (adapter-level failure),
+    the helper prints a stderr line and keeps looping. The
+    loop must not crash on transient adapter failures — a
+    screen magnifier that has been running for hours should
+    survive a momentary blip.
+    """
+    cfg = zoom.ZoomConfig(rows=2, cols=3, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+    call_log: list[int] = []
+
+    def flaky_capture() -> str:
+        call_log.append(1)
+        n = sum(call_log)
+        if n == 1:
+            raise ValueError("region too small")
+        if n == 2:
+            raise RuntimeError("adapter unavailable")
+        return "abc\ndef"  # third call succeeds
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        # stop_predicate is consulted at the top of each iteration.
+        # Three calls means we need the predicate to fire on the
+        # *fourth* tick: 1=ValueError, 2=RuntimeError, 3=success,
+        # 4=stop.
+        return ticks["n"] >= 4
+
+    rc = zoom._tail_screen_and_render(
+        _screen.FakeScreen(["placeholder"]),  # adapter is unused (we inject)
+        cfg,
+        interval=0.0,
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        sink=frames.append,
+        capture_fn=flaky_capture,
+    )
+    assert rc == 0
+    # Only the third call (the successful one) yields a frame.
+    assert len(frames) == 1
+    assert "abc" in frames[0]
+
+
+def test_tail_screen_and_render_follow_keeps_tail_in_view() -> None:
+    """``--follow`` on the screen-capture path keeps the *last*
+    ``cfg.rows`` lines of the captured source in view, the
+    same way the text-source ``--follow`` does. The frozen
+    config is left untouched; the per-frame offset is a
+    derived value.
+    """
+    cap = _screen.FakeScreen(["L1", "L2", "L3", "L4", "L5"])
+    cfg = zoom.ZoomConfig(rows=2, cols=2, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        return ticks["n"] >= 2
+
+    zoom._tail_screen_and_render(
+        cap,
+        cfg,
+        interval=0.0,
+        follow=True,
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        sink=frames.append,
+    )
+    # cfg.rows=2, the source has 5 lines → tail is lines 3-5, but
+    # cols=2 so we only see the first 2 chars of each: "L4" and "L5".
+    assert len(frames) == 1
+    assert "L4" in frames[0]
+    assert "L5" in frames[0]
+    assert "L1" not in frames[0]  # --follow keeps the head off the viewport
+    # The original (frozen) config is untouched.
+    assert cfg.row_offset == 0
+
+
+def test_tail_screen_and_render_max_frames_caps_iterations() -> None:
+    """``--max-frames`` on the screen-capture path caps the loop
+    at the requested number of *iterations*, not emitted
+    frames. Same semantics as the text-source path.
+    """
+    cap = _screen.FakeScreen(["aaa", "bbb"])
+    cfg = zoom.ZoomConfig(rows=2, cols=3, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        # Change the grid every poll so the change detector
+        # would keep emitting.
+        cap._grid = ["xxx", "yyy"] if ticks["n"] >= 2 else ["aaa", "bbb"]  # type: ignore[attr-defined]
+        return ticks["n"] >= 5
+
+    rc = zoom._tail_screen_and_render(
+        cap,
+        cfg,
+        interval=0.0,
+        max_frames=2,
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        sink=frames.append,
+    )
+    assert rc == 0
+    # Two iterations, two distinct frames (we mutated on tick 2).
+    assert len(frames) == 2
+    assert "aaa" in frames[0]
+    assert "xxx" in frames[1]
+
+
+def test_tail_screen_and_render_uses_capture_fn_when_provided() -> None:
+    """When ``capture_fn`` is injected, the adapter (``cap``) is
+    never touched. The injection point exists so tests can run
+    the screen-tail loop with a fake source without a real
+    adapter — and so callers can pre-derive a string from
+    their own pipeline (e.g. a logged tty) without going
+    through the ScreenCapture protocol.
+    """
+    cfg = zoom.ZoomConfig(rows=2, cols=3, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+    adapter_used: list[bool] = []
+
+    class TrackingAdapter(_screen.ScreenCapture):
+        """Adapter that records whether it was ever called."""
+
+        def screen_size(self) -> tuple[int, int]:
+            adapter_used.append(True)
+            return (3, 2)
+
+        def capture(self, *, x: int, y: int, w: int, h: int) -> list[str]:
+            adapter_used.append(True)
+            return ["should not be called"]
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        return ticks["n"] >= 2
+
+    zoom._tail_screen_and_render(
+        TrackingAdapter(),
+        cfg,
+        interval=0.0,
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        sink=frames.append,
+        capture_fn=lambda: "abc\ndef",
+    )
+    assert adapter_used == []  # the adapter was never queried
+    assert len(frames) == 1
+    assert "abc" in frames[0]
+
+
+def test_tail_screen_and_render_has_changed_injection() -> None:
+    """When ``has_changed`` is injected, it overrides the default
+    ``!=`` check. This is the knob real OS adapters could use
+    to say "always re-render" (e.g. if they can't cheaply diff
+    their pixel grid) or "never re-render after the first"
+    (e.g. a one-shot magnifier).
+    """
+    cap = _screen.FakeScreen(["aaa", "bbb"])
+    cfg = zoom.ZoomConfig(rows=2, cols=3, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        return ticks["n"] >= 4
+
+    # Always re-render: even though the grid is static, the
+    # override forces a frame on every poll.
+    zoom._tail_screen_and_render(
+        cap,
+        cfg,
+        interval=0.0,
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        sink=frames.append,
+        has_changed=lambda _prev, _cur: True,
+    )
+    assert len(frames) == 3  # three polls, all forced to render
+
+
+def test_main_screen_live_with_snapshot_writes_each_frame(
+    tmp_path, capsys
+) -> None:
+    """``--screen --live --snapshot PATH``: each frame is written
+    to PATH (overwriting). On a FakeScreen whose grid is
+    static, only the first frame is written; the test pins
+    that the snapshot file actually contains the magnified
+    viewport.
+    """
+    snap = tmp_path / "out.txt"
+    rc = zoom.main(
+        [
+            "--screen",
+            "--backend",
+            "fake",
+            "--fake-grid",
+            "abc\ndef",
+            "--live",
+            "--max-frames",
+            "1",
+            "--rows",
+            "2",
+            "--cols",
+            "3",
+            "--zoom",
+            "1",
+            "--snapshot",
+            str(snap),
+            "--quiet",
+        ]
+    )
+    assert rc == 0
+    text = snap.read_text(encoding="utf-8")
+    assert "abc" in text
+    assert "def" in text
+
+
+def test_main_screen_live_unsupported_backend_exits_1(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """``--screen --live --backend x11`` on a headless box exits 1
+    with a helpful stderr message. ``--live`` doesn't change
+    the backend-resolution path; the ``--screen`` source
+    resolution still early-returns when no OS adapter is
+    available.
+    """
+    rc = zoom.main(["--screen", "--live", "--backend", "x11"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "x11" in err
+    assert "fake" in err  # the workaround
+
+
+def test_main_screen_live_follow_tracks_screen_tail(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """``--screen --live --follow --backend fake --fake-grid ...``
+    shows the *last* ``--rows`` lines of the captured grid,
+    not the first. The FakeScreen's grid is fixed in this
+    test, so the tail doesn't change — but the viewport
+    composition must still apply.
+    """
+    rc = zoom.main(
+        [
+            "--screen",
+            "--backend",
+            "fake",
+            "--fake-grid",
+            "L1\nL2\nL3\nL4",
+            "--live",
+            "--follow",
+            "--max-frames",
+            "1",
+            "--rows",
+            "2",
+            "--cols",
+            "2",
+            "--zoom",
+            "1",
+            "--quiet",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # tail of the 4-line fake screen with rows=2: L3, L4 → "L3", "L4"
+    assert "L3" in out
+    assert "L4" in out
+    assert "L1" not in out  # --follow keeps the head off the viewport
+
+
+def test_main_live_without_file_or_screen_is_usage_error(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """``--live`` without ``--file`` *or* ``--screen`` is a usage
+    error (exit 2). The previous behaviour was
+    ``--live --file`` only; the screen path is now also
+    accepted, but neither is a hard error."""
+    with pytest.raises(SystemExit) as exc_info:
+        zoom.parse_args(["--live"])
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "--live requires --file PATH or --screen" in err
+
+
+def test_parse_args_live_screen_no_file_parses() -> None:
+    """``--live --screen`` (no ``--file``) parses cleanly: the
+    screen-capture tail doesn't need a file to tail. This is
+    the new behaviour the tick just unlocked."""
+    args = zoom.parse_args(
+        [
+            "--screen",
+            "--backend",
+            "fake",
+            "--fake-grid",
+            "abc\ndef",
+            "--live",
+        ]
+    )
+    assert args.live is True
+    assert args.screen is True
+    assert args.file is None
+    assert args.backend == "fake"
+
+
+def test_main_screen_live_max_frames_bounds_run(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """``--screen --live --max-frames N`` actually exits after N
+    iterations, even when the FakeScreen's grid is static.
+    End-to-end through ``main()`` — proves the
+    :func:`_tail_screen_and_render` dispatch wired by the
+    tick is reachable from the CLI and that ``--max-frames``
+    flows through.
+    """
+    rc = zoom.main(
+        [
+            "--screen",
+            "--backend",
+            "fake",
+            "--fake-grid",
+            "abc\ndef",
+            "--live",
+            "--max-frames",
+            "3",
+            "--rows",
+            "2",
+            "--cols",
+            "3",
+            "--zoom",
+            "1",
+            "--interval",
+            "0.001",
+            "--quiet",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Only one frame is actually emitted (static FakeScreen
+    # grid → change detector fires once, then idles), but the
+    # loop must still have terminated cleanly with rc=0.
+    assert "abc" in out

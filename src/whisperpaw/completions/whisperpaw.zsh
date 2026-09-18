@@ -67,7 +67,7 @@ _paw_zoom() {
     '--charset[Fill character for empty cells: ''space'' (default, invisible), ''hash'' (#), or ''d…]' \
     '--quiet[Suppress the announcement line (still renders).]' \
     '--snapshot[Write the rendered viewport to PATH instead of stdout.]' \
-    '--live[Follow --file PATH like ''tail -f'': re-render the magnified viewport every time…]' \
+    '--live[Follow the source like ''tail -f'': re-render the magnified viewport every time i…]' \
     '--interval[Poll interval in seconds for --live (default: 0.25, must be > 0).]' \
     '--follow[Track the tail of --file PATH (like ''tail -f'') instead of showing the start.]' \
     '--max-frames[Cap --live at N loop iterations (default: 0 = unlimited, the current behaviour).]' \

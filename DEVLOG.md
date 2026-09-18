@@ -1479,3 +1479,83 @@ ctypes call (like Win32). Either is ~100 lines and one tick.
   (the existing `test_main_screen_*` tests cover the
   one-shot path, but not `--screen --live` because
   that path isn't wired yet).
+
+## 2026-09-18 — `paw-zoom --screen --live` is wired end-to-end
+
+This is the tick the previous "next tick" line literally
+asked for: pin down the FakeScreen end-to-end live test, and
+land the screen-capture tail that the v0.2 line was missing.
+
+- **New helper: `whisperpaw.zoom._tail_screen_and_render`.**
+  Sibling of `_tail_and_render`. Same loop shape, same
+  `stop_predicate` / `clock` / `max_frames` / `sink` /
+  `follow` plumbing; only the source changes. Instead of
+  re-reading a file with mtime change-detection, the helper
+  re-runs the `ScreenCapture` adapter on every poll (via
+  `whisperpaw._screen.capture_screen_to_source`) and
+  re-renders when the captured text differs from the
+  previous frame. Two injection points let tests and real
+  callers override the defaults: `capture_fn` (return a
+  custom string, e.g. a logged tty, without going through
+  the `ScreenCapture` protocol) and `has_changed` (custom
+  change detector — useful for OS adapters that can't
+  cheaply diff their pixel grid).
+- **`--screen --live` is now a first-class CLI path.** The
+  `main()` live branch dispatches to
+  `_tail_screen_and_render` when `--screen` is set, and
+  to `_tail_and_render(args.file, ...)` otherwise. The
+  `--snapshot` / `--follow` / `--max-frames` / `--interval`
+  flags compose the same way on both paths because the
+  shared sink closure in `main()` doesn't care which
+  tail produced the frame.
+- **`--live` now requires `--file` *or* `--screen`.** The
+  previous parse_args gate was `--live and not args.file`,
+  which silently rejected the screen-capture tail. The new
+  gate is `--live and not args.file and not args.screen`,
+  and the error message reads `--live requires --file PATH
+  or --screen` (matches the new `--help` text). Regression
+  guard: `--live` with neither flag is still exit 2.
+- **Error handling.** A `ValueError` (region shape) or
+  `RuntimeError` (adapter-level) from the capture function
+  prints a single stderr line and continues the loop. A
+  transient blip should not kill a magnifier that has
+  been running for hours.
+- **Tests.** 16 new tests in `tests/test_screen.py`:
+  - 7 `_tail_screen_and_render` low-level tests
+    (first frame, grid-mutation triggers re-render, static
+    grid emits exactly one frame, capture_fn / has_changed
+    injection points, capture errors are tolerated,
+    `--follow` keeps the tail in view, `--max-frames`
+    caps iterations, original frozen `cfg` is left
+    untouched by `--follow`).
+  - 4 end-to-end `main()` tests (`--screen --live
+    --backend fake` emits a frame, `--snapshot` writes
+    each frame, `--follow` on the screen tail shows the
+    bottom rows, `--backend x11 --screen --live` exits 1
+    on a headless box).
+  - 2 `parse_args` tests (the loosening: `--live --screen`
+    parses; the tightening: `--live` alone still exit 2).
+  - 1 max-frames end-to-end test.
+  - 1 max-frames on the helper test.
+  - 1 capture_fn-isolates-adapter test (the injected
+    `capture_fn` is used; the adapter's `capture` /
+    `screen_size` are never called).
+- **Total: 498/498 green** (16 new + 482 existing).
+- **Static completion files regenerated** (the
+  `--live` help text changed; the renderer derives
+  completions from flag *names*, not help strings,
+  so the new text propagates everywhere automatically).
+- **No new third-party deps.** Pure stdlib; the helper
+  lives in `whisperpaw/zoom.py` next to
+  `_tail_and_render` so the two live-tail implementations
+  sit side-by-side and the loop shapes can be diffed.
+- **Next tick.** All v0.2 seams are now wired. The next
+  small unit of progress is probably a new sound pack for
+  `paw-sound` (the user asked for one last week and
+  there's still no `keyboard` or `cafe` pack), or a
+  utility module (e.g. a JSON output helper shared across
+  `paw-sound` / `paw-read` / `paw-zoom` so `--json` lives
+  in one place). The "screen magnifier as overlay" UX
+  — hotkeys, exit-on-key, transparent render — is still
+  a 2-3 tick project and should wait for a real user
+  request.

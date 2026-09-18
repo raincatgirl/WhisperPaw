@@ -49,7 +49,7 @@ complete -c paw-zoom -l zoom -d 'Magnification factor: each source cell becomes 
 complete -c paw-zoom -l charset -d 'Fill character for empty cells: \'space\' (default, invisible), \'hash\' (#), or \'d…'
 complete -c paw-zoom -l quiet -d 'Suppress the announcement line (still renders).'
 complete -c paw-zoom -l snapshot -d 'Write the rendered viewport to PATH instead of stdout.'
-complete -c paw-zoom -l live -d 'Follow --file PATH like \'tail -f\': re-render the magnified viewport every time…'
+complete -c paw-zoom -l live -d 'Follow the source like \'tail -f\': re-render the magnified viewport every time i…'
 complete -c paw-zoom -l interval -d 'Poll interval in seconds for --live (default: 0.25, must be > 0).'
 complete -c paw-zoom -l follow -d 'Track the tail of --file PATH (like \'tail -f\') instead of showing the start.'
 complete -c paw-zoom -l max-frames -d 'Cap --live at N loop iterations (default: 0 = unlimited, the current behaviour).'
