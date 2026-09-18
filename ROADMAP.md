@@ -27,7 +27,7 @@ This document is the **single source of truth** for what WhisperPaw will be and 
 | `paw-read`  | ✅ shipped | Read text aloud (stdin / file / clipboard). |
 | `paw-watch` | ✅ shipped | Tail a command and speak new lines. |
 | `paw-complete` | ✅ shipped | Print shell completions (bash / zsh / fish / nushell) for every shipped tool, derived live from each tool's argparse parser. |
-| `paw-zoom`  | ✅ shipped (v0.2) | Magnify a rectangular region of text or of the **screen** (v0.2). v0.1 was an ASCII text-viewport POC; v0.2 adds a `ScreenCapture` adapter protocol, a `FakeScreen` reference implementation, and CLI flags (`--screen`, `--region X,Y,W,H`, `--backend {auto,fake,x11,win32,quartz}`, `--fake-grid`, `--list-backends`, `--json`). The OS-specific adapters (X11 / Win32 / Quartz) ship as stubs that return `None` with a friendly stderr message; the data shape and the rest of the pipeline are real today. |
+| `paw-zoom`  | ✅ shipped (v0.2) | Magnify a rectangular region of text or of the **screen** (v0.2). v0.1 was an ASCII text-viewport POC; v0.2 adds a `ScreenCapture` adapter protocol, a `FakeScreen` reference implementation, and CLI flags (`--screen`, `--region X,Y,W,H`, `--backend {auto,fake,x11,win32,quartz}`, `--fake-grid`, `--list-backends`, `--json`). The OS-specific adapters (X11 / Win32 / **Quartz**) ship as real implementations on their respective platforms; the data shape and the rest of the pipeline are real today. |
 
 Legend: 🐣 planned · 🛠 in progress · ✅ shipped · 🐛 buggy
 
@@ -317,6 +317,7 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-17 — paw-zoom v0.2: ship the screen-capture adapter skeleton. New `whisperpaw._screen` module with a `ScreenCapture` ABC (two methods: `screen_size()` + `capture(x,y,w,h) -> list[str]`), a `FakeScreen` reference implementation, and a `get_capture()` factory. CLI gains `--screen` / `--region X,Y,W,H` / `--backend {auto,fake,x11,win32,quartz}` / `--fake-grid` / `--list-backends` / `--json`. The OS-specific adapters ship as stubs that return None with a friendly "not yet implemented on this OS" message; the v0.1 pipeline (text-source magnifier, --live, --follow, --max-frames, --snapshot) is unchanged. 52 new tests, 350/350 green. Static completion files regenerated.
 - 2026-09-17 — paw-zoom v0.2: ship a real X11 adapter. New `whisperpaw._x11` module with `X11Screen(ScreenCapture)` that shells out to `xwd -root -silent -out -`, parses the 56-byte XWD header (both LE and BE supported), and downsamples the raw BGR/BGRX pixel data to a 5-character density grid. `is_x11_available()` checks `$DISPLAY` + `xwd` on `$PATH`; `build_x11_screen()` returns None on a headless box and a real instance on a Linux desktop. The subprocess runner and discovery checks are injectable so tests don't need a real X server. Wired into `whisperpaw._screen._x11_capture`; on a real Linux desktop `paw-zoom --screen --backend x11` now actually captures pixels instead of printing "not yet implemented". 43 new tests, 393/393 green. Static completion files unchanged.
 - 2026-09-18 — paw-zoom v0.2: ship a real Win32 GDI adapter. New `whisperpaw._win32` module with `Win32Screen(ScreenCapture)` that does the full GetDC / CreateCompatibleDC / CreateCompatibleBitmap / BitBlt / GetDIBits dance via `ctypes` (pure stdlib, no third-party deps) and downsamples the resulting 32-bpp BGRX buffer to the same 5-character density grid as X11. `_default_capture` and `_default_screen_size` lazy-import `ctypes` and the `gdi32` / `user32` DLLs only when actually capturing, so the module stays importable on every platform; `is_win32_available()` gates on `sys.platform == "win32"`. The capture / size / availability callables are injectable so tests synthesise BGRX buffers in memory and feed them through the real `_bgrx_to_grid` downsample path without needing a real Windows desktop. Wired into `whisperpaw._screen._win32_capture`; on a Windows machine `paw-zoom --screen --backend win32` now actually captures pixels instead of printing "not yet implemented". 30 new tests, 423/423 green. Static completion files unchanged.
+- 2026-09-18 — paw-zoom v0.2: ship a real Quartz adapter. New `whisperpaw._quartz` module with `QuartzScreen(ScreenCapture)` that shells out to `screencapture -x -R x,y,w,h -t tiff -` (pure stdlib, no PyObjC, no third-party deps), parses the resulting little-endian TIFF (32-bpp RGBA, no compression, RGB photometric) to find the pixel strip, and downsamples the top-down RGBA buffer to the same 5-character density grid as X11 / Win32. `_default_runner` is the real `subprocess.run` plumbing; the runner, env, and which() are all injectable so tests synthesise minimal TIFF bitstreams in memory and feed them through the real `_parse_tiff_header` and `_rgba_to_grid` paths without needing a real Mac. `is_quartz_available()` gates on `sys.platform == "darwin"` + `shutil.which("screencapture")`; `_parse_tiff_header` rejects any non-32-bpp-RGBA / compressed / palette-based image with a clear `RuntimeError` rather than silently mis-rendering. Wired into `whisperpaw._screen._quartz_capture`; on a macOS machine `paw-zoom --screen --backend quartz` now actually captures pixels instead of printing "not yet implemented". 45 new tests, 468/468 green. Static completion files unchanged.
 <!-- TICK-LOG-END -->
 
 (Updated 2026-09-17: `paw-zoom` v0.2 ships the screen-capture
@@ -351,4 +352,21 @@ captures pixels; on every other platform the factory returns
 `None` and the CLI prints the friendly "not yet implemented
 on this OS" message. The Quartz adapter is the next tick,
 again a self-contained ~100-line module that drops into
-`_BACKEND_FACTORIES`.)
+`_BACKEND_FACTORIES`.
+
+Updated 2026-09-18 (later same day): the Quartz adapter is
+shipped. New `whisperpaw._quartz` module with
+`QuartzScreen(ScreenCapture)`, `is_quartz_available()`,
+`build_quartz_screen()`, the pure `_rgba_to_grid()` downsample
+helper, and the pure `_parse_tiff_header()` parser that turns
+`screencapture -x -R x,y,w,h -t tiff -`'s 32-bpp RGBA TIFF
+output into a top-down pixel buffer (the runner is the real
+`subprocess.run` plumbing, lazy-imported on first capture so
+the module is importable on every platform). On a real macOS
+machine `paw-zoom --screen --backend quartz` now actually
+captures pixels; on every other platform the factory returns
+`None` and the CLI prints the friendly "not yet implemented
+on this OS" message. All three v0.2 OS adapters (X11 / Win32
+/ Quartz) are now real — the v0.2 line is done; the only
+remaining gap is the FakeScreen test coverage for the
+end-to-end v0.2 pipeline, which lands in a follow-up tick.)

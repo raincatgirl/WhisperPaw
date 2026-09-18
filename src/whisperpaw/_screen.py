@@ -365,9 +365,16 @@ def _win32_capture() -> ScreenCapture | None:
 def _quartz_capture() -> ScreenCapture | None:
     """Return a real macOS Quartz adapter if one can be constructed.
 
-    Stub today; the Quartz adapter is the tick after the Win32 one.
+    Lazy-imports the adapter module so ``whisperpaw._screen``
+    itself stays importable on platforms that don't have
+    macOS's ``screencapture`` binary available. The
+    :func:`whisperpaw._quartz.build_quartz_screen` factory
+    returns ``None`` on non-Darwin platforms (and on Darwin
+    without ``screencapture``) — the common case on a Linux
+    / Windows dev box.
     """
-    return None
+    from whisperpaw import _quartz
+    return _quartz.build_quartz_screen()
 
 
 # ---------------------------------------------------------------------------

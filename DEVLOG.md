@@ -1297,3 +1297,99 @@ deps, no telemetry, no network. The Quartz adapter is the
 last of the three stubbed OS adapters — a `screencapture`
 shelling adapter (like X11) or a small `CoreGraphics`
 ctypes call (like Win32). Either is ~100 lines and one tick.
+
+## 2026-09-18 — `paw-zoom` v0.2: real Quartz adapter
+
+- Implemented `whisperpaw._quartz` end-to-end: the third and
+  last of the v0.2 OS-specific screen-capture adapters.
+  Ships `QuartzScreen(ScreenCapture)` (the adapter),
+  `is_quartz_available()` (the discovery helper),
+  `build_quartz_screen()` (the factory hook that
+  `_screen._quartz_capture` delegates to), `TiffHeader`
+  (the parsed-header NamedTuple), `_parse_tiff_header()`
+  (the pure TIFF parser), `_sample_rgba_cell_brightness()`
+  and `_rgba_to_grid()` (the pure downsample helpers that
+  mirror the X11 / Win32 ones).
+- The capture path: `screencapture -x -R x,y,w,h -t tiff -`
+  (the macOS-shipped CLI, no PyObjC, no third-party deps)
+  piped to stdout, then a 50-line little-endian TIFF parser
+  extracts the 9 tags the downsample path needs
+  (`ImageWidth`, `ImageLength`, `BitsPerSample=8`,
+  `Compression=1` (none), `PhotometricInterpretation=2`
+  (RGB), `SamplesPerPixel=4`, `RowsPerStrip`,
+  `StripOffsets`, `StripByteCounts`). The pixel strip is
+  read as 32-bpp RGBA, top-down, and downsampled to the
+  same 5-character density grid as X11 / Win32 so the
+  rendered output is consistent across all three OS
+  adapters.
+- The factory gates on `sys.platform == "darwin"` AND
+  `shutil.which("screencapture")` (cheap, both checks
+  short-circuit before any subprocess fork). The runner,
+  env, which() callables, and availability check are all
+  injectable so tests synthesise a minimal valid TIFF
+  bitstream in memory (an 8-byte LE header + a 9-entry IFD +
+  a pixel strip with a 1-byte gap) and feed it through the
+  real `_parse_tiff_header` and `_rgba_to_grid` paths
+  without needing a real Mac.
+- The TIFF parser is intentionally narrow: any non-32-bpp,
+  compressed, or palette-based image is rejected with a
+  clear `RuntimeError` so we fail loudly rather than
+  silently mis-render.
+- 45 new tests in `tests/test_quartz.py` covering:
+  - 4 `is_quartz_available` tests (Linux short-circuits
+    to False, missing binary returns False on real Mac,
+    etc.)
+  - 8 `_parse_tiff_header` tests (minimal happy path,
+    truncated input, unknown byte order, wrong magic,
+    mismatched `BitsPerSample` / `SamplesPerPixel` /
+    `Compression` / `Photometric`, IFD past EOF)
+  - 6 `_sample_rgba_cell_brightness` tests (red / blue /
+    white / alpha-ignored / out-of-bounds / top-down
+    row order)
+  - 8 `_rgba_to_grid` tests (basic red, basic white,
+    zero-w, zero-h, negative dims rejected, zero screen,
+    checkerboard, two-extremes)
+  - 9 `QuartzScreen` end-to-end tests (size-via-runner,
+    size-runner-failure, capture-via-runner, w/h
+    validation, zero short-circuit, runner failure,
+    truncated output, short-strip padding, cache refresh)
+  - 4 `build_quartz_screen` factory tests
+  - 4 integration tests (dispatch with monkey-patched
+    factory, dispatch returns None on Linux, auto order
+    includes quartz, `paw-zoom --screen --backend quartz`
+    on Linux prints the friendly "not yet implemented on
+    this OS" message and exits 1)
+- **Total: 468/468 green** (45 new + 423 existing).
+- **One small design call worth flagging.** I picked
+  `screencapture` + TIFF parsing over `CoreGraphics` via
+  `ctypes` (the "real" way). The CG path needs
+  `CGDirectDisplayID` + `CGDisplayBounds` for size,
+  `CGDisplayCreateImage` for the bitmap,
+  `CGDataProviderCopyData` for the pixel bytes, and a
+  half-dozen type / function-pointer shims. That's
+  ~200 lines of ctypes plumbing for a screen magnifier
+  the user is going to be looking at slowly, and it
+  locks the module to a single OS (we couldn't even
+  *import* it on Linux CI). `screencapture` ships with
+  every macOS since 10.4 and gives us a real, no-deps
+  TIFF bitstream we can parse in 50 lines. The X11
+  adapter made the same `xwd + XWD parsing` choice for
+  the same reason, and the codebase stays consistent.
+- **Bookkeeping.** Wired into
+  `whisperpaw._screen._quartz_capture` (replaced the
+  `return None` stub with `from whisperpaw import _quartz;
+  return _quartz.build_quartz_screen()` — same shape as
+  the X11 / Win32 wiring). No static completion files
+  needed regenerating — the four shipped files are still
+  byte-identical to the live renderer output, because
+  the backend names and CLI flags didn't change, only
+  the backend that satisfies `--backend quartz`.
+- All three v0.2 OS adapters (X11 / Win32 / Quartz) are
+  now real. The v0.2 line is done; the next tick can
+  either add a non-OS feature (e.g. `paw-sound` keyboard
+  pack, or a streaming `--follow` improvement on
+  `paw-read`) or wrap up by closing the v0.1 → v0.2
+  coverage gap (an end-to-end test that exercises the
+  v0.2 pipeline through `paw-zoom --screen --backend
+  fake --fake-grid ...` and asserts the magnified output
+  shape end-to-end).
