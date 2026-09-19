@@ -1503,15 +1503,15 @@ def test_main_info_mutual_exclusion_with_snapshot(capsys) -> None:
 
 
 def test_main_info_json_without_discovery_flag_is_usage_error(capsys) -> None:
-    """``--json`` without ``--list-backends`` or ``--info`` is
-    a usage error (exit 2) — the same fail-fast the
+    """``--json`` without ``--list-backends`` / ``--info`` / ``--size``
+    is a usage error (exit 2) — the same fail-fast the
     ``--list-backends --json`` combo used to do.
     """
     rc = zoom.main(["--json"])
     captured = capsys.readouterr()
     assert rc == 2
     assert (
-        "--json requires --list-backends or --info" in captured.err
+        "--json requires --list-backends, --info, or --size" in captured.err
     )
 
 

@@ -252,8 +252,36 @@ identifying the source kind (text vs screen) and size is
 written to stderr unless ``--quiet`` is set, so by default
 ``--raw`` keeps stdout clean for piping. The primary use
 case is debugging a screen-capture adapter ("what did X11
-actually see?") without the magnification noise getting in
-the way.
+actually see?") without the magnification noise getting in the
+way.
+
+``--size`` is the *text-source dimensions* mode: print the source
+size as ``"rows x cols"`` (code points) and exit 0 without
+rendering or capturing anything. It is the text-side analog of
+``--info`` (``--info`` answers "what screen-capture setup would I
+get?"; ``--size`` answers "how big is the source?"). The source
+is resolved exactly the way it would be for a render (positional
+→ ``--file`` → stdin → ``--screen`` with ``--backend`` /
+``--region`` / ``--fake-grid`` for screen capture), then
+counted. ``--json`` composes with ``--size`` →
+``{"rows": N, "cols": M}`` (single-line, sorted keys, no ASCII
+escaping). It is mutually exclusive with ``--info``, ``--live``,
+``--follow``, ``--max-frames``, ``--snapshot``, ``--raw``, and
+``--list-backends`` — all of them exist to drive a render or a
+different discovery; ``--size`` is the smallest discovery there
+is. The viewport-modifying flags (``--zoom`` / ``--rows`` /
+``--cols`` / ``--offset`` / ``--col-offset`` / ``--charset``)
+are *not* rejected, for the same reason ``--raw`` ignores them:
+the output shape of a size report does not depend on them, so a
+shell alias can keep them without breaking the report. The
+derivation lives in :func:`whisperpaw.zoom._source_size` so the
+math is testable without touching the CLI. The conventions
+match the rest of the module: lines are split on ``\n``; a single
+trailing empty line is dropped when the source ends in ``\n``
+(same as :func:`whisperpaw.zoom._extract_region` and
+:func:`whisperpaw.zoom._tail_offset`); an empty source reports
+``(1, 0)`` — one row of zero columns, the natural shape for
+"there's a window but nothing in it".
 
 ### `paw-zoom` v0.2 (screen-capture adapter skeleton)
 
@@ -461,7 +489,8 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-18 — paw-sound: wire --volume to the per-stream-capable audio backends. afplay now takes `-v VALUE` (pass-through in [0.0, 1.0]); paplay takes `--volume=N` scaled to a 16-bit unsigned int in [0, 65535] via int(round(v * 65535)) with defensive clamp. aplay (ALSA) and PowerShell SoundPlayer silently drop the value because they have no per-stream knob (aplay would need a separate `amixer` call; SoundPlayer is fixed-gain). New public `volume_supported(backend_name)` + `current_backend_name()` helpers (pure, derive from the same `shutil.which` ladder as `pick_backend` so they cannot drift). `--help` text expanded to call out which backends honour the flag. 15 new tests, 483/483 green. Static completion files unchanged (flag already shipped; only the help text expanded).
 - 2026-09-18 — paw-zoom v0.2: wire --screen --live end-to-end. New `_tail_screen_and_render` helper (sibling of `_tail_and_render`) re-captures the screen on every poll and re-renders the magnified viewport when the captured text changes. Composes with --follow / --max-frames / --snapshot / --interval — same sink plumbing the text-source tail uses. --live now accepts --file *or* --screen (the previous gate required --file). 16 new tests in test_screen.py (FakeScreen end-to-end, mutation-driven change detection, capture_fn / has_changed injection points, ValueError + RuntimeError resilience, --follow on the captured tail, --max-frames cap, --snapshot write, --backend x11 --screen --live exits 1 on a headless box, parse_args loosening). 498/498 green. Static completion files regenerated (--live help text changed).
 - 2026-09-18 — paw-zoom: add --raw flag (dump the source — text or screen — to stdout verbatim, no magnification). Mutually exclusive with --live / --follow / --max-frames / --snapshot at parse time (exit 2). The viewport-modifying flags (--zoom / --rows / --cols / --offset / --col-offset / --charset) are silently ignored in --raw mode so a shell alias can keep them. --quiet suppresses the opt-in stderr one-liner. 15 new tests in test_zoom.py (default/flagged, four mutual-exclusion rejections, positional / --file / --screen / --screen --region dumps, --quiet suppression, --raw on a headless box, --raw without a source, silent viewport-flag ignoring). 513/513 green. Static completion files regenerated.
-- 2026-09-19 — paw-zoom: add --info flag (screen-capture diagnostic). New public helpers in `whisperpaw._screen`: `describe_capture(backend, region, fake_grid, get_capture_fn)` returns a 5-key metadata dict (backend / available / adapter / screen_size / region); `describe_to_text(info)` renders it as 5 fixed-order `key: value` lines; `describe_to_json(info)` emits the same shape as a single-line parseable JSON object. The CLI flag --info requires --screen (a usage error otherwise) and is mutually exclusive with --live / --follow / --max-frames / --snapshot / --raw (exit 2). --info --json combines them; --json is also now valid with --list-backends. The flag short-circuits in main() before the source-resolution block so a missing OS adapter is reported as `available: no` rather than a fatal exit-1. 27 new tests in test_screen.py (describe_capture fake / unavailable / factory-ValueError / OS-backend / explicit region / "full" / out-of-range clamp / adapter screen_size failure / region-parsing error; describe_to_text format / dash placeholders; describe_to_json round-trip / None preservation; main --info requires --screen / text mode / JSON mode / unavailable / explicit region / 3 mutual-exclusion rejections / JSON-without-discovery / malformed fake-grid / help text; parse_args default + flag). 540/540 green. Static completion files regenerated.
+- 2026-09-19 — paw-zoom: add `--info` flag (screen-capture diagnostic). New public helpers in `whisperpaw._screen`: `describe_capture(backend, region, fake_grid, get_capture_fn)` returns a 5-key metadata dict (backend / available / adapter / screen_size / region); `describe_to_text(info)` renders it as 5 fixed-order `key: value` lines; `describe_to_json(info)` emits the same shape as a single-line parseable JSON object. The CLI flag --info requires --screen (a usage error otherwise) and is mutually exclusive with --live / --follow / --max-frames / --snapshot / --raw (exit 2). --info --json combines them; --json is also now valid with --list-backends. The flag short-circuits in main() before the source-resolution block so a missing OS adapter is reported as `available: no` rather than a fatal exit-1. 27 new tests in test_screen.py (describe_capture fake / unavailable / factory-ValueError / OS-backend / explicit region / "full" / out-of-range clamp / adapter screen_size failure / region-parsing error; describe_to_text format / dash placeholders; describe_to_json round-trip / None preservation; main --info requires --screen / text mode / JSON mode / unavailable / explicit region / 3 mutual-exclusion rejections / JSON-without-discovery / malformed fake-grid / help text; parse_args default + flag). 540/540 green. Static completion files regenerated.
+- 2026-09-19 — paw-zoom: add `--size` flag (text-source dimensions discovery). The text-side analog of --info: --info answers "what screen-capture setup would I get?"; --size answers "how big is the source?". New public helpers in `whisperpaw.zoom`: `SourceSize` named tuple alias, `_source_size(source) -> (rows, max_cols)` (code-point units; drops a single trailing empty line if the source ends in `\n` — same convention as `_tail_offset` and `_extract_region`; empty source returns `(1, 0)` — the natural shape for "window with nothing in it"), `_size_to_text(size)` (fixed `R x C` format), `_size_to_json(size)` (single-line `{"cols": C, "rows": R}` with sorted keys + `ensure_ascii=False`). The CLI flag works for all three source-resolution paths (positional, --file, --screen with --backend/--region/--fake-grid), short-circuits AFTER source resolution but BEFORE the render / --raw block, and is mutually exclusive with --info / --live / --follow / --max-frames / --snapshot / --raw / --list-backends (exit 2 with a clear stderr message). --json composes with --size → `{"rows": N, "cols": M}`. The mutual-exclusion check is ordered BEFORE `--live requires --file/--screen` so the contradiction message wins when both would fire. 37 new tests in test_zoom.py (8 _source_size low-level tests covering basic / single-line / empty / whitespace / trailing-newline / internal-blank-line / unicode / max-col-picks-longest; 3 _size_to_text / _size_to_json tests covering format / zero-cols / round-trip / key sort / ensure_ascii; 2 parse_args tests covering default off + flagged; 16 main() end-to-end tests covering positional text / multiline / JSON / --file / --file-missing / --screen / --screen --json / --screen --region / unsupported-backend / no-source / 6 mutual-exclusion rejections with one snapshot-write guard / JSON-without-discovery / malformed-fake-grid / viewport-flag-ignoring / help-text / short-circuits-before-render). 577/577 green. Static completion files regenerated so --size shows up in Tab completion.
 <!-- TICK-LOG-END -->
 
 (Updated 2026-09-17: `paw-zoom` v0.2 ships the screen-capture

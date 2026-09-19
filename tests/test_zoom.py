@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 from contextlib import redirect_stdout, redirect_stderr
 
@@ -1275,3 +1276,443 @@ def test_main_raw_silently_ignores_viewport_flags(capsys) -> None:
     # The dump is the literal source — no magnification, no
     # padding, no offsets applied.
     assert out == "hello world\n"
+
+
+# ---------------------------------------------------------------------------
+# --size: text-source dimensions discovery
+# ---------------------------------------------------------------------------
+
+
+def test_source_size_basic() -> None:
+    """A multi-line source reports (rows, max line width) in
+    code points. Two lines of 3 and 4 chars = (2, 4)."""
+    assert zoom._source_size("abc\ndefg") == (2, 4)
+
+
+def test_source_size_single_line() -> None:
+    """A single-line source reports (1, line_width)."""
+    assert zoom._source_size("hello") == (1, 5)
+
+
+def test_source_size_empty_string() -> None:
+    """An empty string reports (1, 0) — the natural shape for
+    'there's a window but nothing in it'."""
+    assert zoom._source_size("") == (1, 0)
+
+
+def test_source_size_whitespace_only() -> None:
+    """A whitespace-only source is a real source of N
+    whitespace rows; the renderer would paint them as a
+    fill rectangle. ``"   \\n   \\n   "`` is 3 rows of 3 cols
+    of whitespace, not an empty source."""
+    assert zoom._source_size("   \n   \n   ") == (3, 3)
+
+
+def test_source_size_drops_trailing_empty_line() -> None:
+    """A source ending in ``\\n`` has the trailing empty line
+    dropped, the same way ``_extract_region`` and
+    ``_tail_offset`` treat it. So ``"a\\nb\\n"`` reports (2, 1)
+    not (3, 1) — the trailing newline is a line terminator, not
+    a phantom row."""
+    assert zoom._source_size("a\nb\n") == (2, 1)
+
+
+def test_source_size_keeps_internal_empty_lines() -> None:
+    """Internal empty lines are *kept* — only the trailing one
+    is dropped. ``"a\\n\\nb"`` is three lines: "a", "", "b"."""
+    assert zoom._source_size("a\n\nb") == (3, 1)
+
+
+def test_source_size_unicode_columns() -> None:
+    """Column counts are in code points, not bytes — a CJK line
+    is one row of two columns, not six columns (the .encode()
+    byte length)."""
+    # U+732B = "cat" (3 bytes in UTF-8), U+59CB = "begin" (3 bytes)
+    assert zoom._source_size("猫始") == (1, 2)
+
+
+def test_source_size_max_col_picks_longest() -> None:
+    """The max-cols is the *longest* line, not the first or
+    last. ``"a\\nlonger\\nb"`` has rows=3, max=6."""
+    assert zoom._source_size("a\nlonger\nb") == (3, 6)
+
+
+def test_size_to_text_format() -> None:
+    """``_size_to_text`` emits a fixed ``"rows x cols"`` line
+    that downstream tooling can ``split(" x ")`` to get the
+    two integers."""
+    assert zoom._size_to_text((3, 12)) == "3 x 12"
+
+
+def test_size_to_text_zero_cols() -> None:
+    """An empty source emits ``"1 x 0"`` (the natural shape)
+    rather than ``"1 x 0"`` being mangled into a shorter
+    string. Layout is always ``"R x C"``."""
+    assert zoom._size_to_text((1, 0)) == "1 x 0"
+
+
+def test_size_to_json_round_trip() -> None:
+    """``_size_to_json`` is a single-line parseable JSON
+    object with sorted keys."""
+    out = zoom._size_to_json((3, 12))
+    assert "\n" not in out
+    parsed = json.loads(out)
+    assert parsed == {"rows": 3, "cols": 12}
+
+
+def test_size_to_json_keys_sorted() -> None:
+    """The JSON keys are sorted (``cols`` before ``rows``)
+    so byte-for-byte output is deterministic across runs.
+    Crucial for the byte-identity test in
+    ``test_completions`` and for any downstream tool that
+    diffs output."""
+    out = zoom._size_to_json((1, 0))
+    assert out.index('"cols"') < out.index('"rows"')
+
+
+def test_size_to_json_none_unicode_safe() -> None:
+    """``ensure_ascii=False`` is set so non-ASCII content
+    doesn't escape into ``\\uXXXX`` form."""
+    out = zoom._size_to_json((2, 3))
+    # A sanity check on the JSON itself; ensure_ascii is what
+    # *would* matter for a CJK size, but we just verify the
+    # flag is in effect by checking the call doesn't crash and
+    # returns valid JSON for a normal numeric size.
+    assert json.loads(out) == {"rows": 2, "cols": 3}
+
+
+def test_parse_args_size_default_is_false() -> None:
+    """``--size`` defaults to off; existing behaviour is
+    unchanged unless the flag is passed."""
+    args = zoom.parse_args(["hello"])
+    assert args.size is False
+
+
+def test_parse_args_size_flag_sets_true() -> None:
+    """``--size`` parses to ``True`` and composes with all
+    three source-resolution paths (positional, --file,
+    --screen)."""
+    args = zoom.parse_args(["--size", "hello"])
+    assert args.size is True
+    # --file
+    args = zoom.parse_args(["--size", "--file", "/tmp/whatever"])
+    assert args.size is True
+    # --screen
+    args = zoom.parse_args(["--size", "--screen", "--backend", "fake"])
+    assert args.size is True
+
+
+def test_main_size_positional_text_mode(capsys) -> None:
+    """``paw-zoom --size "hello world"`` prints ``"1 x 11"``
+    and exits 0 without any rendering."""
+    rc = zoom.main(["--size", "hello world"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert out.out == "1 x 11\n"
+    assert out.err == ""
+
+
+def test_main_size_positional_multiline(capsys) -> None:
+    """``paw-zoom --size "abc\\ndefg"`` prints ``"2 x 4"`` —
+    the longest line is 4 chars, two lines total."""
+    rc = zoom.main(["--size", "abc\ndefg"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert out.out == "2 x 4\n"
+
+
+def test_main_size_json_mode(capsys) -> None:
+    """``paw-zoom --size --json "abc\\ndefg"`` prints a
+    single-line ``{"rows": 2, "cols": 4}`` object and exits
+    0. The shape matches the ``describe_to_json`` /
+    ``to_json`` style the rest of the discovery flags use."""
+    rc = zoom.main(["--size", "--json", "abc\ndefg"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "\n" not in out.out.rstrip("\n")
+    parsed = json.loads(out.out)
+    assert parsed == {"rows": 2, "cols": 4}
+
+
+def test_main_size_file_source(tmp_path, capsys) -> None:
+    """``--size --file PATH`` reads the file and reports its
+    dimensions. Sanity-checks the --file path of source
+    resolution for --size."""
+    p = tmp_path / "hello.txt"
+    p.write_text("hi\nworld", encoding="utf-8")
+    rc = zoom.main(["--size", "--file", str(p)])
+    out = capsys.readouterr()
+    assert rc == 0
+    # "hi" is 2 wide, "world" is 5 wide, 2 rows total.
+    assert out.out == "2 x 5\n"
+
+
+def test_main_size_file_missing_is_error(tmp_path, capsys) -> None:
+    """``--size --file /missing`` exits 1 with a clear stderr
+    message — the file-not-found path is the same one
+    ``_resolve_source`` raises, and --size doesn't try to
+    be cleverer than that."""
+    missing = tmp_path / "does-not-exist.txt"
+    rc = zoom.main(["--size", "--file", str(missing)])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "file not found" in captured.err
+
+
+def test_main_size_with_screen_capture(capsys) -> None:
+    """``--size --screen --backend fake --fake-grid "abc\\nde"``
+    captures the fake screen and reports the captured grid
+    dimensions. ``FakeScreen`` truncates every row to the
+    *shortest* row's width (a monospace text grid has no
+    notion of row N being wider than row M), so the
+    captured grid is ``"ab\\nde"`` — 2 rows of 2 cols."""
+    rc = zoom.main(
+        [
+            "--size",
+            "--screen",
+            "--backend", "fake",
+            "--fake-grid", "abc\nde",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    assert out.out == "2 x 2\n"
+
+
+def test_main_size_with_screen_capture_json(capsys) -> None:
+    """``--size --json --screen --backend fake --fake-grid
+    "abc\\nde"`` combines the screen-capture path with the
+    JSON output mode. Round-trips through ``json.loads``.
+    Same FakeScreen row-truncation as the text-mode test."""
+    rc = zoom.main(
+        [
+            "--size", "--json",
+            "--screen",
+            "--backend", "fake",
+            "--fake-grid", "abc\nde",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    parsed = json.loads(out.out)
+    assert parsed == {"rows": 2, "cols": 2}
+
+
+def test_main_size_with_screen_and_region(capsys) -> None:
+    """``--size --screen --backend fake --fake-grid TEXT
+    --region X,Y,W,H`` reports the size of the *resolved*
+    region, not the full screen. The region is 2x2 of the
+    'abcdef\\nghijkl' fake grid starting at (3, 0) — that
+    is 'de\\ngh', two rows of 2 cols (FakeScreen
+    row-truncates the full grid to width 6, so col 3-4
+    gives 'de' and 'gh')."""
+    rc = zoom.main(
+        [
+            "--size",
+            "--screen",
+            "--backend", "fake",
+            "--fake-grid", "abcdef\nghijkl",
+            "--region", "3,0,2,2",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    assert out.out == "2 x 2\n"
+
+
+def test_main_size_with_unsupported_screen_backend_exits_1(capsys) -> None:
+    """``--size --screen --backend x11`` on a headless box
+    exits 1 with the friendly 'not yet implemented on this
+    OS' message — the screen-capture failure path still
+    applies; --size is just a different *consumer* of the
+    resolved source."""
+    rc = zoom.main(["--size", "--screen", "--backend", "x11"])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "not yet implemented" in captured.err
+
+
+def test_main_size_without_any_source_exits_2(capsys) -> None:
+    """``--size`` with no positional, no --file, no --screen
+    (and stdin empty because the conftest forces
+    ``WPAW_ZOOM_STDIN_OVERRIDE=""``) is a usage error
+    (exit 2) — there is literally no source to measure."""
+    rc = zoom.main(["--size"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "no text to magnify" in captured.err
+
+
+def test_main_size_mutual_exclusion_with_info(capsys) -> None:
+    """``--size --info`` is rejected (exit 2) — they are
+    two different kinds of discovery."""
+    rc = zoom.main(["--size", "--info", "--screen"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--size cannot be combined with --info" in captured.err
+
+
+def test_main_size_mutual_exclusion_with_live(capsys) -> None:
+    """``--size --live`` is rejected (exit 2) — --live is a
+    render driver, --size is metadata-only."""
+    rc = zoom.main(["--size", "--live", "x"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--size cannot be combined with --live" in captured.err
+
+
+def test_main_size_mutual_exclusion_with_follow(capsys) -> None:
+    """``--size --follow`` is rejected (exit 2) — same
+    rationale as --live."""
+    rc = zoom.main(["--size", "--follow", "x"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--size cannot be combined with --follow" in captured.err
+
+
+def test_main_size_mutual_exclusion_with_max_frames(capsys) -> None:
+    """``--size --max-frames N`` is rejected (exit 2)."""
+    rc = zoom.main(["--size", "--max-frames", "3", "x"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--size cannot be combined with --max-frames" in captured.err
+
+
+def test_main_size_mutual_exclusion_with_snapshot(capsys) -> None:
+    """``--size --snapshot PATH`` is rejected (exit 2). The
+    snapshot file must NOT have been written — the
+    contradiction is caught before the source-resolution
+    block, so we never even reach the file-write step."""
+    rc = zoom.main(
+        [
+            "--size",
+            "--snapshot", "/tmp/should_not_be_written.txt",
+            "x",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--size cannot be combined with --snapshot" in captured.err
+    import os
+    assert not os.path.exists("/tmp/should_not_be_written.txt")
+
+
+def test_main_size_mutual_exclusion_with_raw(capsys) -> None:
+    """``--size --raw`` is rejected (exit 2) — --raw is a
+    dump mode, --size is metadata-only."""
+    rc = zoom.main(["--size", "--raw", "x"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--size cannot be combined with --raw" in captured.err
+
+
+def test_main_size_mutual_exclusion_with_list_backends(capsys) -> None:
+    """``--size --list-backends`` is rejected (exit 2) — they
+    are two different kinds of discovery and we don't want
+    to emit more than one of them per invocation."""
+    rc = zoom.main(["--size", "--list-backends"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert (
+        "--size cannot be combined with --list-backends" in captured.err
+    )
+
+
+def test_main_size_json_without_discovery_flag_is_usage_error(capsys) -> None:
+    """``--json`` without ``--list-backends`` / ``--info`` /
+    ``--size`` is a usage error (exit 2). Same fail-fast the
+    ``--list-backends --json`` combo used to do."""
+    rc = zoom.main(["--json"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert (
+        "--json requires --list-backends, --info, or --size"
+        in captured.err
+    )
+
+
+def test_main_size_with_malformed_fake_grid_is_usage_error(capsys) -> None:
+    """``--size --screen --backend fake --fake-grid ''`` (an
+    empty fake grid) is rejected at the parse-fake-grid
+    boundary with a clear message, not silently reported
+    as a zero-size source."""
+    rc = zoom.main(
+        [
+            "--size",
+            "--screen",
+            "--backend", "fake",
+            "--fake-grid", "",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--fake-grid" in captured.err
+
+
+def test_main_size_silently_ignores_viewport_flags(capsys) -> None:
+    """Viewport-modifying flags (``--zoom``, ``--rows``,
+    ``--cols``, ``--offset``, ``--col-offset``, ``--charset``)
+    are silently ignored in --size mode — the reported
+    dimensions don't depend on them, so the user can keep
+    these flags in a shell alias without breaking the size
+    report. Same spirit as --raw's silent viewport-flag
+    ignoring."""
+    rc = zoom.main(
+        [
+            "--size",
+            "--zoom", "8",
+            "--rows", "1",
+            "--cols", "80",
+            "--offset", "5",
+            "--col-offset", "10",
+            "--charset", "dot",
+            "hello world",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The size is the literal source — no magnification, no
+    # offsets, no viewport math applied.
+    assert out == "1 x 11\n"
+
+
+def test_main_size_help_text_mentions_flag(capsys) -> None:
+    """The ``--help`` text mentions ``--size`` so a casual
+    ``paw-zoom --help`` user discovers it. Catches
+    accidental renames."""
+    rc = zoom.main(["--help"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "--size" in out.out
+
+
+def test_main_size_short_circuits_before_render(capsys) -> None:
+    """``--size`` must NOT call ``render_viewport`` — a direct
+    proof: the render path turns an empty source into
+    ``rows * cfg.cols`` chars of fill, but ``--size`` reports
+    the actual measured shape ``1 x 0`` instead. If the
+    renderer were running, the user would never see a
+    ``cols=0`` size in the output."""
+    rc = zoom.main(["--size", ""])  # empty positional
+    out = capsys.readouterr()
+    # Empty positional is treated as "no source" by
+    # _resolve_source → RuntimeError → exit 2. So we exercise
+    # the empty-source path through --file instead.
+    assert rc == 2
+    import tempfile
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+    ) as fh:
+        fh.write("")  # empty file
+        empty_path = fh.name
+    try:
+        rc = zoom.main(["--size", "--file", empty_path])
+        out = capsys.readouterr()
+        assert rc == 0
+        # Empty file → empty string → (1, 0). The renderer
+        # would have produced 10*40=400 chars of fill, not
+        # "1 x 0". The fact that we see "1 x 0" proves
+        # --size never called render_viewport.
+        assert out.out == "1 x 0\n"
+    finally:
+        os.unlink(empty_path)

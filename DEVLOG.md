@@ -1785,3 +1785,86 @@ request to scope, so it became this tick.
   someone asks), or the screen-magnifier overlay UX
   (hotkeys, exit-on-key, transparent render — still a
   2-3 tick project).
+
+## 2026-09-19 — `paw-zoom --size` ships: text-source dimensions discovery
+
+**What changed.** A new `--size` flag on `paw-zoom` prints the
+source dimensions (`rows x cols`, in code points) and exits 0
+without rendering or capturing anything. It's the text-side analog
+of `--info` (which is the screen-capture-side diagnostic): `--info`
+answers "what screen-capture setup would I get?", `--size` answers
+"how big is the source?".
+
+**Why.** The introspection story is now symmetric — a user can ask
+either question about either side of the pipeline without going
+through a render. The flag also composes with `--json` for the
+same single-line parseable shape the rest of the discovery flags
+use, so a downstream `jq` / `awk` / build-artefact consumer can
+discover source dimensions the same way it discovers backends.
+
+**How.**
+- **Public helpers in `whisperpaw.zoom`.** Three new functions:
+  `_source_size(source) -> (rows, max_cols)` (code-point units;
+  drops a single trailing empty line if the source ends in `\n` —
+  same convention as `_tail_offset` and `_extract_region`; empty
+  source returns `(1, 0)` — the natural shape for "window with
+  nothing in it"), `_size_to_text(size)` (fixed `R x C` format,
+  easy to grep), `_size_to_json(size)` (single-line
+  `{"cols": C, "rows": R}` with sorted keys + `ensure_ascii=False`
+  for CJK content). `SourceSize` is exposed as a `tuple[int, int]`
+  alias so callers don't have to remember the positional order.
+- **CLI.** `--size` works for all three source-resolution paths
+  (positional, `--file`, `--screen` with `--backend` /
+  `--region` / `--fake-grid`), short-circuits AFTER source
+  resolution but BEFORE the render / `--raw` block, and is
+  mutually exclusive with `--info` / `--live` / `--follow` /
+  `--max-frames` / `--snapshot` / `--raw` / `--list-backends`
+  (exit 2 with a clear stderr message). `--json` composes with
+  `--size` → `{"rows": N, "cols": M}`. The mutual-exclusion check
+  is ordered BEFORE `--live requires --file/--screen` so the
+  contradiction message wins when both would fire.
+- **Bookkeeping.** Regenerated all four static shell-completion
+  files (`completions/whisperpaw.{bash,zsh,fish,nu}`) so `--size`
+  shows up in Tab completion for every shell. The byte-identity
+  test in `tests/test_completions.py` caught the drift and forced
+  the regen, as it has for every prior tick.
+- **Tests.** 37 new tests in `tests/test_zoom.py`:
+  - 8 `_source_size` low-level tests (basic multi-line, single
+    line, empty string, whitespace-only, trailing-newline drop,
+    internal-blank-line keep, CJK code-point counting, max-col
+    picks the longest line).
+  - 5 `_size_to_text` / `_size_to_json` tests (format, zero-cols,
+    JSON round-trip, key sort, `ensure_ascii=False`).
+  - 2 `parse_args` tests (default off, flagged composes with
+    positional / `--file` / `--screen`).
+  - 16 `main()` end-to-end tests (positional text, positional
+    multi-line, JSON mode, `--file` source, `--file` missing,
+    `--screen` capture, `--screen --json`, `--screen --region`,
+    unsupported backend exit-1, no source exit-2, 6 mutual-
+    exclusion rejections including a snapshot-write guard,
+    `--json` without discovery, malformed `--fake-grid`,
+    silent viewport-flag ignoring, `--help` mentions `--size`,
+    short-circuits-before-render proven by the empty-source
+    `(1, 0)` case the renderer would have replaced with fill).
+  - 6 update in `tests/test_screen.py`: the existing
+    `--json requires --list-backends or --info` test now expects
+    the new `--json requires --list-backends, --info, or --size`
+    message (the help text and error string are the same shape
+    the rest of the discovery flags use).
+
+**Total: 577/577 green** (37 new + 540 existing). Pure stdlib, no
+new pip deps, no telemetry, no network. The new helpers live
+next to `_tail_offset` in `whisperpaw/zoom.py` so the source-
+size public surface stays co-located with the other source-
+introspection helpers.
+
+**Next tick.** With `--size` shipped, the source-introspection
+story is also complete — a user can discover the source
+dimensions, the screen-capture setup, the available backends,
+and the available sound packs / TTS backends / Piper voices, on
+any box, without going through a render or a render-attempt.
+Natural follow-ups: a fourth sound pack (still needs a user
+request), the shared `to_json()` / describe helper (a refactor
+across modules, deferred unless someone asks), or the
+screen-magnifier overlay UX (hotkeys, exit-on-key, transparent
+render — still a 2-3 tick project).

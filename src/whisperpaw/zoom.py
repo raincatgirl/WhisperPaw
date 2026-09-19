@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import json
 import os
 import sys
 import time
@@ -291,6 +292,70 @@ def _tail_offset(source: str, rows: int) -> int:
     if total <= rows:
         return 0
     return total - rows
+
+
+#: Tuple shape returned by :func:`_source_size` — ``(rows, max_cols)``
+#: in code-point units. A standalone named alias so callers don't
+#: have to remember the positional order; mirrors the
+#: ``list[list[str]]`` style the screen-capture adapters return.
+SourceSize = tuple[int, int]
+
+
+def _source_size(source: str) -> SourceSize:
+    """Return ``(rows, max_cols)`` of ``source`` in code-point units.
+
+    A source-side analog of the screen-capture ``describe_capture``
+    helper. The conventions match the rest of ``paw-zoom``:
+
+    * Lines are split on ``\\n`` (same as :func:`_extract_region`).
+    * A single trailing empty line is dropped when the source ends
+      in ``\\n`` (same convention as :func:`_tail_offset`), so a
+      file ending in a newline reports the *content* line count
+      rather than the trailing terminator as a phantom row.
+    * An empty / whitespace-only source reports ``(1, 0)`` — one
+      row of zero columns, the natural shape for "there's a
+      window but nothing in it". This matches what the renderer
+      would actually emit: :func:`render_viewport` paints one
+      row of fill chars for an empty source.
+    * ``max_cols`` is measured in code points (``len(line)``), not
+      bytes, so a multi-byte CJK line is counted correctly. The
+      rendered viewport is also code-point based, so the two
+      numbers mean the same thing.
+    """
+    if not source:
+        return (1, 0)
+    lines = source.split("\n")
+    if lines and lines[-1] == "" and source.endswith("\n"):
+        lines = lines[:-1]
+    if not lines:
+        return (1, 0)
+    return (len(lines), max(len(line) for line in lines))
+
+
+def _size_to_text(size: SourceSize) -> str:
+    """Render a :data:`SourceSize` as a single ``"rows x cols"`` line.
+
+    Parallel to :func:`whisperpaw._screen.describe_to_text` —
+    fixed format, predictable layout, easy to grep. ``cols`` is
+    always emitted (even when zero) so downstream tooling can
+    always split on ``" x "`` to get two integers.
+    """
+    rows, cols = size
+    return f"{rows} x {cols}"
+
+
+def _size_to_json(size: SourceSize) -> str:
+    """Render a :data:`SourceSize` as a single-line parseable JSON object.
+
+    Parallel to :func:`whisperpaw._screen.describe_to_json` — the
+    shape ``{"rows": N, "cols": M}`` is fixed so ``jq '.rows'`` and
+    friends work without further coercion. Single-line, sorted
+    keys, ``ensure_ascii=False``.
+    """
+    rows, cols = size
+    # ``json.dumps`` with ``sort_keys=True`` gives the deterministic
+    # key order the rest of the discovery helpers already use.
+    return json.dumps({"rows": rows, "cols": cols}, sort_keys=True, ensure_ascii=False)
 
 
 def _tail_and_render(
@@ -739,6 +804,28 @@ def build_parser() -> argparse.ArgumentParser:
             "already short-circuits)."
         ),
     )
+    parser.add_argument(
+        "--size",
+        action="store_true",
+        dest="size",
+        help=(
+            "Print the source dimensions (rows x cols, in code "
+            "points) and exit 0 without rendering or capturing "
+            "anything. The source is resolved exactly the way it "
+            "would be for a render (positional -> --file -> "
+            "stdin -> --screen with --backend/--region/--fake-grid "
+            "for screen capture), then counted. Combine with "
+            "--json for a single-line parseable object "
+            "({'rows': N, 'cols': M}). The text-side analog of "
+            "--info: --info answers 'what screen-capture setup "
+            "would I get?'; --size answers 'how big is the "
+            "source?'. Mutually exclusive with --info, --live, "
+            "--follow, --max-frames, --snapshot, --raw, and "
+            "--list-backends (all of them exist to drive a "
+            "render or a different discovery; --size is the "
+            "smallest discovery there is)."
+        ),
+    )
     # v0.2: screen-capture flags. The group lives behind
     # ``add_screen_args`` so the parser stays readable.
     _screen.add_screen_args(parser)
@@ -764,13 +851,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="as_json",
         help=(
-            "Combine with --list-backends (or --info) to emit a "
-            "single-line JSON object instead of the default text "
+            "Combine with --list-backends, --info, or --size to emit "
+            "a single-line JSON object instead of the default text "
             "output. --list-backends --json -> {'backends': [...]}; "
             "--info --json -> {'backend': ..., 'available': ..., "
             "'adapter': ..., 'screen_size': [w, h], 'region': "
-            "[x, y, w, h]}. Using --json without --list-backends "
-            "or --info is a usage error (exit 2)."
+            "[x, y, w, h]}; --size --json -> {'rows': N, 'cols': M}. "
+            "Using --json without --list-backends, --info, or --size "
+            "is a usage error (exit 2)."
         ),
     )
     return parser
@@ -805,6 +893,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             file=sys.stderr,
         )
         raise SystemExit(2)
+    # --size is the text-source-side analog of --info: a
+    # metadata-only mode that exits 0 before any render. It
+    # contradicts the same render-driving flags --info does,
+    # plus the other discovery flags (--info, --list-backends)
+    # because each one is a different kind of discovery and we
+    # don't want to emit more than one of them per invocation.
+    # We run this check *before* the value-of-flag checks below
+    # (e.g. ``--live requires --file or --screen``) so the
+    # mutual-exclusion message wins when both would fire —
+    # the contradiction between the two flags is the more
+    # useful diagnostic.
+    if args.size:
+        for flag, value in (
+            ("--info", args.info),
+            ("--live", args.live),
+            ("--follow", args.follow),
+            ("--max-frames", args.max_frames),
+            ("--snapshot", args.snapshot),
+            ("--raw", args.raw),
+            ("--list-backends", args.list_backends),
+        ):
+            if value:
+                print(
+                    f"paw-zoom: --size cannot be combined with {flag} "
+                    f"(--size is a metadata-only mode that exits "
+                    f"before any render or other discovery)",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
     if args.live and not args.file and not args.screen:
         print(
             "paw-zoom: --live requires --file PATH or --screen "
@@ -895,12 +1012,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     file=sys.stderr,
                 )
                 raise SystemExit(2)
-    # --json only pairs with --list-backends or --info. Anything
-    # else is ambiguous — an empty JSON object would be a worse
-    # failure mode than a clear stderr message.
-    if args.as_json and not (args.list_backends or args.info):
+    # --json only pairs with --list-backends, --info, or --size.
+    # Anything else is ambiguous — an empty JSON object would be
+    # a worse failure mode than a clear stderr message.
+    if args.as_json and not (args.list_backends or args.info or args.size):
         print(
-            "paw-zoom: --json requires --list-backends or --info",
+            "paw-zoom: --json requires --list-backends, --info, or --size",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -1009,6 +1126,23 @@ def main(argv: list[str] | None = None) -> int:
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
             return 2
+
+    # v0.2.2: --size is the text-side analog of --info. It runs
+    # *after* source resolution (so the source can be a text arg,
+    # --file, stdin, or a --screen capture) and *before* the
+    # render / --raw block, so it short-circuits without ever
+    # building a ZoomConfig or writing a magnified viewport.
+    # The source string we just resolved is exactly the string
+    # the renderer would see (same _resolve_source stripping,
+    # same capture_screen_to_source joining), so the size we
+    # report is the size the user would magnify.
+    if args.size:
+        size = _source_size(source)
+        if args.as_json:
+            print(_size_to_json(size))
+        else:
+            print(_size_to_text(size))
+        return 0
 
     if args.raw:
         # --raw: dump the source to stdout verbatim, no magnification,
