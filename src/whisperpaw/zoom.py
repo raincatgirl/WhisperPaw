@@ -721,6 +721,24 @@ def build_parser() -> argparse.ArgumentParser:
             "frame)."
         ),
     )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help=(
+            "Dump the source (text or screen) to stdout as plain "
+            "text, with no magnification, no padding, and no "
+            "announcement line unless --quiet is *not* set. With "
+            "--screen, prints the captured screen grid (after "
+            "--region clamping); with a text source, prints the "
+            "resolved text verbatim. Useful for debugging a screen "
+            "capture adapter ('what did the adapter actually see?') "
+            "and for piping the raw source into a downstream tool. "
+            "Mutually exclusive with --live, --follow, --max-frames, "
+            "and --snapshot (none of them make sense for a raw "
+            "dump). Has no effect with --list-backends (which "
+            "already short-circuits)."
+        ),
+    )
     # v0.2: screen-capture flags. The group lives behind
     # ``add_screen_args`` so the parser stays readable.
     _screen.add_screen_args(parser)
@@ -781,6 +799,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             file=sys.stderr,
         )
         raise SystemExit(2)
+    # --raw is the "no magnification" mode: dump the source as-is
+    # and exit. It contradicts the live / follow / max-frames /
+    # snapshot machinery, all of which exist to feed the magnified
+    # pipeline. We reject the combinations explicitly (exit 2) so
+    # the user gets a clear message instead of a silently
+    # contradictory behaviour. The viewport-modifying flags
+    # (--zoom / --rows / --cols / --offset / --col-offset /
+    # --charset) are *not* rejected: the output shape of a raw
+    # dump does not depend on them, so silently ignoring them
+    # matches the spirit of "dump it as-is" without forcing the
+    # user to drop flags from a shell alias or wrapper.
+    if args.raw:
+        for flag, value in (
+            ("--live", args.live),
+            ("--follow", args.follow),
+            ("--max-frames", args.max_frames),
+            ("--snapshot", args.snapshot),
+        ):
+            if value:
+                print(
+                    f"paw-zoom: --raw cannot be combined with {flag} "
+                    f"(a raw dump is a single non-magnified output)",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
     # v0.2: --fake-grid needs --backend fake (otherwise it has
     # nothing to do, and silently ignoring the grid would be a
     # confusing footgun). --screen without a usable backend
@@ -881,6 +924,43 @@ def main(argv: list[str] | None = None) -> int:
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
             return 2
+
+    if args.raw:
+        # --raw: dump the source to stdout verbatim, no magnification,
+        # no padding, no ZoomConfig. The source is already in the
+        # ``str`` shape we want: text sources have been resolved
+        # (and the trailing newline stripped by ``_resolve_source``);
+        # screen sources have been captured by
+        # ``_screen.capture_screen_to_source`` (rows joined with
+        # ``\n``, padded with spaces for out-of-range cells). We
+        # respect --quiet: by default the announcement line is
+        # suppressed in --raw mode (the whole point is "give me the
+        # data and nothing else"), and --quiet on top of that would
+        # be a no-op. The source string is written as-is followed
+        # by a single trailing newline so the cursor lands on a
+        # new line for the shell prompt.
+        if not args.quiet:
+            # An opt-in one-liner identifying what was dumped, so
+            # the user can tell a raw screen capture from a raw
+            # text source in scrollback.
+            kind = "screen" if args.screen else "text"
+            print(
+                f"🐾 paw-zoom: --raw {kind} dump "
+                f"({len(source)} chars, "
+                f"{source.count(chr(10)) + 1 if source else 0} lines)",
+                file=sys.stderr,
+            )
+        # Use sys.stdout.write + newline so the dump ends on a
+        # fresh line regardless of the source's own trailing
+        # newline (text sources have their trailing \n stripped
+        # by ``_resolve_source``; screen captures end with a
+        # ``\n`` from the ``"\n".join`` in
+        # ``capture_screen_to_source``).
+        sys.stdout.write(source)
+        if not source.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+        return 0
 
     cfg = ZoomConfig(
         rows=args.rows,

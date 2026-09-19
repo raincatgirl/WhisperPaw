@@ -1080,3 +1080,198 @@ def test_main_max_frames_without_live_still_renders_once(
     # A one-shot render emits exactly one block (rows * zoom lines,
     # which is 1 line at zoom=1).
     assert out.count("only one") == 1
+
+
+# ---------------------------------------------------------------------------
+# --raw: dump source (text or screen) to stdout without magnification
+# ---------------------------------------------------------------------------
+
+
+def test_parse_args_raw_default_is_false() -> None:
+    """``--raw`` is a boolean flag, default False."""
+    args = zoom.parse_args(["hello"])
+    assert args.raw is False
+
+
+def test_parse_args_raw_flag_sets_true() -> None:
+    """``--raw`` flips the flag on."""
+    args = zoom.parse_args(["--raw", "hello"])
+    assert args.raw is True
+
+
+def test_parse_args_raw_rejects_live(capsys) -> None:
+    """``--raw --live`` is a usage error (exit 2)."""
+    with pytest.raises(SystemExit) as exc:
+        zoom.parse_args(["--raw", "--live", "--file", "/tmp/x"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--raw" in err
+    assert "--live" in err
+
+
+def test_parse_args_raw_rejects_snapshot(capsys) -> None:
+    """``--raw --snapshot PATH`` is a usage error (exit 2)."""
+    with pytest.raises(SystemExit) as exc:
+        zoom.parse_args(["--raw", "--snapshot", "/tmp/x", "hello"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--raw" in err
+    assert "--snapshot" in err
+
+
+def test_parse_args_raw_rejects_follow(capsys) -> None:
+    """``--raw --follow`` is a usage error (exit 2)."""
+    with pytest.raises(SystemExit) as exc:
+        zoom.parse_args(["--raw", "--follow", "--file", "/tmp/x"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--raw" in err
+    assert "--follow" in err
+
+
+def test_parse_args_raw_rejects_max_frames(capsys) -> None:
+    """``--raw --max-frames N`` is a usage error (exit 2)."""
+    with pytest.raises(SystemExit) as exc:
+        zoom.parse_args(
+            ["--raw", "--max-frames", "5", "--file", "/tmp/x"]
+        )
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--raw" in err
+    assert "--max-frames" in err
+
+
+def test_main_raw_positional_prints_text_source(capsys) -> None:
+    """``--raw "hello"`` dumps the positional text source verbatim."""
+    rc = zoom.main(["--raw", "hello world"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The exact source is printed, with a single trailing newline.
+    assert out == "hello world\n"
+
+
+def test_main_raw_file_prints_file_contents(
+    tmp_path, capsys
+) -> None:
+    """``--raw --file PATH`` dumps the file contents verbatim."""
+    src = tmp_path / "notes.txt"
+    src.write_text("alpha\nbeta\ngamma", encoding="utf-8")
+    rc = zoom.main(["--raw", "--file", str(src)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The trailing newline is stripped by _resolve_source (same
+    # behaviour as the magnifier), then a single \n is appended by
+    # the --raw branch. So the file's three lines end up
+    # newline-separated, with one final \n.
+    assert out == "alpha\nbeta\ngamma\n"
+
+
+def test_main_raw_quiet_suppresses_announcement(capsys) -> None:
+    """``--raw --quiet`` writes nothing to stderr (no announcement
+    line). The whole point of --raw is "give me the data and
+    nothing else", so the announcement is opt-in via !--quiet."""
+    rc = zoom.main(["--raw", "--quiet", "hello"])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert err == ""
+
+
+def test_main_raw_with_announcement_prints_one_liner(capsys) -> None:
+    """``--raw`` (no ``--quiet``) emits a single opt-in stderr line
+    so the user can tell a raw screen capture from a raw text
+    source in scrollback."""
+    rc = zoom.main(["--raw", "hello\nworld"])
+    assert rc == 0
+    out, err = capsys.readouterr()
+    assert out == "hello\nworld\n"
+    assert "paw-zoom" in err
+    assert "--raw" in err
+    assert "text" in err  # identifies the source kind
+
+
+def test_main_raw_with_screen_capture_dumps_screen(capsys) -> None:
+    """``--raw --screen --backend fake --fake-grid ...`` prints the
+    captured screen grid verbatim (no magnification, no padding)."""
+    rc = zoom.main(
+        [
+            "--raw",
+            "--screen",
+            "--backend", "fake",
+            "--fake-grid", "abc\ndef\nghi",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The screen capture is "\n".join(["abc", "def", "ghi"]) =
+    # "abc\ndef\nghi". The --raw branch then appends a final
+    # newline (the captured source already ends in \n, so the
+    # endwith guard skips a second one).
+    assert out == "abc\ndef\nghi\n"
+
+
+def test_main_raw_with_screen_and_region_uses_sub_grid(capsys) -> None:
+    """``--raw --screen --region X,Y,W,H`` dumps the captured
+    sub-grid verbatim."""
+    rc = zoom.main(
+        [
+            "--raw",
+            "--screen",
+            "--backend", "fake",
+            "--fake-grid", "abcdef\nghijkl\nmnopqr",
+            "--region", "0,1,3,2",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The fake screen is 3 rows × 6 cols. --region 0,1,3,2 means
+    # "start at (x=0, y=1), take a 3-wide × 2-tall window" →
+    # rows 1 and 2 clipped to columns 0..2 → row 1 is "ghijkl"
+    # → "ghi"; row 2 is "mnopqr" → "mno". Joined: "ghi\nmno".
+    assert out == "ghi\nmno\n"
+
+
+def test_main_raw_with_unsupported_screen_backend_exits_1(capsys) -> None:
+    """``--raw --screen --backend x11`` on a headless box exits 1
+    with the same friendly message the magnified --screen path
+    uses."""
+    rc = zoom.main(["--raw", "--screen", "--backend", "x11"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "x11" in err
+    assert "fake" in err  # the workaround
+
+
+def test_main_raw_without_any_source_exits_2(capsys) -> None:
+    """``--raw`` with no positional, no ``--file``, and no
+    ``--screen`` falls through to the text-source resolver, which
+    raises ``RuntimeError`` (mapped to exit 2) because there's
+    nothing to dump."""
+    rc = zoom.main(["--raw"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "no text" in err
+
+
+def test_main_raw_silently_ignores_viewport_flags(capsys) -> None:
+    """Viewport-modifying flags (``--zoom``, ``--rows``, ``--cols``,
+    ``--offset``, ``--col-offset``, ``--charset``) are silently
+    ignored in --raw mode — the output shape of a raw dump does
+    not depend on them, so the user can keep these flags in a
+    shell alias or wrapper without breaking the dump."""
+    rc = zoom.main(
+        [
+            "--raw",
+            "--zoom", "8",
+            "--rows", "1",
+            "--cols", "80",
+            "--offset", "5",
+            "--col-offset", "10",
+            "--charset", "dot",
+            "hello world",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The dump is the literal source — no magnification, no
+    # padding, no offsets applied.
+    assert out == "hello world\n"

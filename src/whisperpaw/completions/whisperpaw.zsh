@@ -71,6 +71,7 @@ _paw_zoom() {
     '--interval[Poll interval in seconds for --live (default: 0.25, must be > 0).]' \
     '--follow[Track the tail of --file PATH (like ''tail -f'') instead of showing the start.]' \
     '--max-frames[Cap --live at N loop iterations (default: 0 = unlimited, the current behaviour).]' \
+    '--raw[Dump the source (text or screen) to stdout as plain text, with no magnification…]' \
     '--screen[Capture a rectangular region of the visual screen and magnify it, instead of ma…]' \
     '--region[Screen rectangle to capture when --screen is set.]' \
     '--backend[Screen-capture backend to use when --screen is set (default: auto — picks the f…]' \

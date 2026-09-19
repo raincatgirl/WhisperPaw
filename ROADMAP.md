@@ -203,7 +203,9 @@ so the math and the CLI don't need to change.
 CLI: ``paw-zoom [TEXT] [--file PATH] [--rows N] [--cols N]
 [--offset N] [--col-offset N] [--zoom 1..32]
 [--charset space|hash|dot] [--quiet] [--snapshot PATH]
-[--live] [--interval SECS] [--follow] [--max-frames N]``.
+[--live] [--interval SECS] [--follow] [--max-frames N] [--raw]
+[--screen] [--region X,Y,W,H] [--backend {auto,fake,x11,win32,quartz}]
+[--fake-grid TEXT] [--list-backends] [--json]``.
 
 Exit codes: 0 ok, 1 ``--file`` not found, 2 usage / no source /
 invalid args.
@@ -229,6 +231,29 @@ exits on the second iteration. Composes with ``--follow``,
 ``--snapshot``, and the standard ``--interval`` poll cadence.
 Has no effect without ``--live`` (the one-shot render always
 emits exactly one frame).
+
+``--raw`` is the *no-magnification* mode: dump the resolved
+source (text or screen) to stdout verbatim, then exit. With a
+text source (``positional`` / ``--file PATH`` / stdin) it prints
+the resolved string; with ``--screen`` it prints whatever
+:func:`whisperpaw._screen.capture_screen_to_source` returned
+(the captured grid joined with ``\n``, optionally clipped by
+``--region``). It is mutually exclusive with ``--live``,
+``--follow``, ``--max-frames``, and ``--snapshot`` — all of
+which exist to feed the magnified pipeline, and the
+contradiction is rejected at parse time (exit 2 with a clear
+message naming both flags). The viewport-modifying flags
+(``--zoom`` / ``--rows`` / ``--cols`` / ``--offset`` /
+``--col-offset`` / ``--charset``) are *not* rejected: a raw
+dump's output shape does not depend on them, so silently
+ignoring them lets a user keep the flags in a shell alias or
+wrapper without breaking the dump. An opt-in one-liner
+identifying the source kind (text vs screen) and size is
+written to stderr unless ``--quiet`` is set, so by default
+``--raw`` keeps stdout clean for piping. The primary use
+case is debugging a screen-capture adapter ("what did X11
+actually see?") without the magnification noise getting in
+the way.
 
 ### `paw-zoom` v0.2 (screen-capture adapter skeleton)
 
@@ -403,6 +428,7 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-18 — paw-zoom v0.2: ship a real Quartz adapter. New `whisperpaw._quartz` module with `QuartzScreen(ScreenCapture)` that shells out to `screencapture -x -R x,y,w,h -t tiff -` (pure stdlib, no PyObjC, no third-party deps), parses the resulting little-endian TIFF (32-bpp RGBA, no compression, RGB photometric) to find the pixel strip, and downsamples the top-down RGBA buffer to the same 5-character density grid as X11 / Win32. `_default_runner` is the real `subprocess.run` plumbing; the runner, env, and which() are all injectable so tests synthesise minimal TIFF bitstreams in memory and feed them through the real `_parse_tiff_header` and `_rgba_to_grid` paths without needing a real Mac. `is_quartz_available()` gates on `sys.platform == "darwin"` + `shutil.which("screencapture")`; `_parse_tiff_header` rejects any non-32-bpp-RGBA / compressed / palette-based image with a clear `RuntimeError` rather than silently mis-rendering. Wired into `whisperpaw._screen._quartz_capture`; on a macOS machine `paw-zoom --screen --backend quartz` now actually captures pixels instead of printing "not yet implemented". 45 new tests, 468/468 green. Static completion files unchanged.
 - 2026-09-18 — paw-sound: wire --volume to the per-stream-capable audio backends. afplay now takes `-v VALUE` (pass-through in [0.0, 1.0]); paplay takes `--volume=N` scaled to a 16-bit unsigned int in [0, 65535] via int(round(v * 65535)) with defensive clamp. aplay (ALSA) and PowerShell SoundPlayer silently drop the value because they have no per-stream knob (aplay would need a separate `amixer` call; SoundPlayer is fixed-gain). New public `volume_supported(backend_name)` + `current_backend_name()` helpers (pure, derive from the same `shutil.which` ladder as `pick_backend` so they cannot drift). `--help` text expanded to call out which backends honour the flag. 15 new tests, 483/483 green. Static completion files unchanged (flag already shipped; only the help text expanded).
 - 2026-09-18 — paw-zoom v0.2: wire --screen --live end-to-end. New `_tail_screen_and_render` helper (sibling of `_tail_and_render`) re-captures the screen on every poll and re-renders the magnified viewport when the captured text changes. Composes with --follow / --max-frames / --snapshot / --interval — same sink plumbing the text-source tail uses. --live now accepts --file *or* --screen (the previous gate required --file). 16 new tests in test_screen.py (FakeScreen end-to-end, mutation-driven change detection, capture_fn / has_changed injection points, ValueError + RuntimeError resilience, --follow on the captured tail, --max-frames cap, --snapshot write, --backend x11 --screen --live exits 1 on a headless box, parse_args loosening). 498/498 green. Static completion files regenerated (--live help text changed).
+- 2026-09-18 — paw-zoom: add --raw flag (dump the source — text or screen — to stdout verbatim, no magnification). Mutually exclusive with --live / --follow / --max-frames / --snapshot at parse time (exit 2). The viewport-modifying flags (--zoom / --rows / --cols / --offset / --col-offset / --charset) are silently ignored in --raw mode so a shell alias can keep them. --quiet suppresses the opt-in stderr one-liner. 15 new tests in test_zoom.py (default/flagged, four mutual-exclusion rejections, positional / --file / --screen / --screen --region dumps, --quiet suppression, --raw on a headless box, --raw without a source, silent viewport-flag ignoring). 513/513 green. Static completion files regenerated.
 <!-- TICK-LOG-END -->
 
 (Updated 2026-09-17: `paw-zoom` v0.2 ships the screen-capture

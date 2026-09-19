@@ -1559,3 +1559,99 @@ land the screen-capture tail that the v0.2 line was missing.
   — hotkeys, exit-on-key, transparent render — is still
   a 2-3 tick project and should wait for a real user
   request.
+
+## 2026-09-19 — `paw-zoom --raw` ships: dump the source verbatim
+
+The next tick's "next tick" line offered three options
+(new sound pack, shared JSON helper, screen-magnifier UX).
+The sound pack needs a specific user request; the JSON
+helper is a refactor (not in the priority list); the UX
+is a multi-tick project. None of those is a small bounded
+*behaviour* change. So I picked a concrete new flag that
+fits the "Add one new concrete behaviour to an existing
+tool" priority slot: `--raw`.
+
+- **What it is.** `paw-zoom --raw` dumps the resolved
+  source — text (positional / `--file` / stdin) or screen
+  (`--screen` + adapter) — to stdout verbatim, with **no
+  magnification, no padding, and no ZoomConfig** involved.
+  It is the "what did the pipeline just see?" debug flag,
+  primarily for OS-adapter diagnostics. On a real Linux
+  desktop:
+
+      paw-zoom --screen --backend x11 --raw
+
+  prints the captured screen grid (one row per logical
+  line, joined with `\n`) without any of the 2× zoom /
+  charset / row-offset shaping getting in the way. On a
+  headless box:
+
+      paw-zoom --raw --screen --backend fake \
+               --fake-grid 'hello\nworld'
+
+  does the same against a `FakeScreen` so the test suite
+  (and humans on a server) can drive it.
+
+- **Parse-time guard.** `--raw` contradicts `--live`,
+  `--follow`, `--max-frames`, and `--snapshot` (they all
+  exist to feed the magnified pipeline, and `--raw`
+  bypasses it). All four combinations are rejected at
+  parse time with exit 2 and a clear message naming both
+  flags — the same fail-fast pattern the other mutually-
+  exclusive combinations use. The viewport-modifying
+  flags (`--zoom` / `--rows` / `--cols` / `--offset` /
+  `--col-offset` / `--charset`) are *not* rejected: the
+  output shape of a raw dump does not depend on them,
+  so silently ignoring them lets the user keep them in a
+  shell alias without breaking the dump.
+
+- **stdout / stderr split.** By default `--raw` writes
+  one opt-in stderr line identifying the source kind
+  ("text" vs "screen") and the byte / line count, so a
+  user can tell a raw screen capture from a raw text
+  source in scrollback. `--quiet` suppresses that line —
+  the whole point of `--raw` is "give me the data and
+  nothing else", so quiet-on-top is the canonical
+  "clean pipe" invocation.
+
+- **Tests.** 15 new tests in `tests/test_zoom.py`:
+  - 6 `parse_args` tests (default, flagged, four
+    mutual-exclusion rejections with stderr assertions).
+  - 4 end-to-end `main()` tests (positional source,
+    `--file` source, `--screen` source with FakeScreen,
+    `--screen --region` clipping).
+  - 1 `--quiet` integration test (stderr is empty).
+  - 1 announcement test (stderr contains the one-liner
+    when `--quiet` is not set).
+  - 1 headless-box test (`--raw --screen --backend x11`
+    exits 1 with the standard "not yet implemented"
+    message).
+  - 1 no-source test (`--raw` alone exits 2 with
+    "no text").
+  - 1 silent-ignore test (`--raw --zoom 8 --rows 1 …`
+    still prints the literal source).
+
+- **Total: 513/513 green** (15 new + 498 existing).
+
+- **Static completion files regenerated** (the new flag
+  is added to the argparse parser, so the four renderers
+  pick it up automatically; the live-renderer
+  byte-identical test in `tests/test_completions.py`
+  caught the drift before push).
+
+- **No new third-party deps.** Pure stdlib; the
+  `--raw` branch lives in `main()` next to the
+  `--screen` source-resolution block, so the
+  text-source and screen-source paths share the same
+  output plumbing (one `sys.stdout.write` + a trailing
+  newline).
+
+- **Next tick.** With `--raw` shipped, the natural
+  follow-ups are: a fourth sound pack (still needs a
+  user request), the shared `to_json()` helper (a
+  refactor, deferred unless someone asks), or a tiny
+  `paw-zoom --list-capture-info` style introspection
+  flag that prints "I'm using `x11` on a `1920x1080`
+  screen, region `0,0,1920,1080`" for adapter
+  debugging. None of those is ready today; will pick
+  based on what the user actually needs next.
