@@ -1646,12 +1646,142 @@ tool" priority slot: `--raw`.
   output plumbing (one `sys.stdout.write` + a trailing
   newline).
 
-- **Next tick.** With `--raw` shipped, the natural
-  follow-ups are: a fourth sound pack (still needs a
-  user request), the shared `to_json()` helper (a
-  refactor, deferred unless someone asks), or a tiny
-  `paw-zoom --list-capture-info` style introspection
-  flag that prints "I'm using `x11` on a `1920x1080`
-  screen, region `0,0,1920,1080`" for adapter
-  debugging. None of those is ready today; will pick
-  based on what the user actually needs next.
+**Next tick.** With `--raw` shipped, the natural
+follow-ups are: a fourth sound pack (still needs a
+user request), the shared `to_json()` helper (a
+refactor, deferred unless someone asks), or a tiny
+`paw-zoom --list-capture-info` style introspection
+flag that prints "I'm using `x11` on a `1920x1080`
+screen, region `0,0,1920,1080`" for adapter
+debugging. None of those is ready today; will pick
+based on what the user actually needs next.
+
+## 2026-09-19 — `paw-zoom --info` ships: screen-capture diagnostic
+
+The previous tick's "next tick" line called out a tiny
+introspection flag as one of the natural follow-ups to
+`--raw`. It was the only one of the three that was a real
+behaviour change (not a refactor) and didn't need a user
+request to scope, so it became this tick.
+
+- **What it is.** `paw-zoom --info` (requires `--screen`)
+  prints a 5-line description of the screen-capture setup
+  this invocation would use and exits 0, without capturing
+  anything:
+
+      backend: fake
+      available: yes
+      adapter: FakeScreen
+      screen_size: 5x2
+      region: 0,0,5,2
+
+  The same data is available as a single-line parseable
+  JSON object via `--info --json`:
+
+      {"backend": "fake", "available": true, "adapter":
+       "FakeScreen", "screen_size": [5, 2], "region": [0, 0, 5, 2]}
+
+  On a headless box with `--backend x11` (no `$DISPLAY`),
+  the flag is the actual answer to "is my screen-capture
+  set up right?":
+
+      backend: x11
+      available: no
+      adapter: -
+      screen_size: -
+      region: -
+
+  ...and exits 0. The flag short-circuits in `main()` before
+  the source-resolution block, so the user's diagnostic
+  never crashes on the thing it's trying to diagnose.
+
+- **Public helpers.** Three new functions in
+  `whisperpaw._screen`:
+  * `describe_capture(backend, *, region, fake_grid,
+    get_capture_fn)` — returns a 5-key metadata dict
+    (`backend` / `available` / `adapter` / `screen_size` /
+    `region`). The function is intentionally **non-raising**:
+    a missing adapter is reported as `available: false` so
+    the diagnostic always answers the user's question.
+    `get_capture_fn` is the injection point so tests don't
+    have to monkey-patch the module-level `get_capture`
+    global.
+  * `describe_to_text(info)` — the fixed-order
+    `key: value` text rendering `--info` prints. `-` for
+    missing fields so the line layout is predictable for a
+    downstream grep / awk.
+  * `describe_to_json(info)` — the single-line parseable
+    JSON object `--info --json` prints. `screen_size` and
+    `region` are emitted as JSON arrays so downstream
+    tooling can index them positionally.
+
+  All three are re-exported in `_screen.__all__` and
+  reachable as `whisperpaw._screen.describe_capture` etc.
+
+- **Mutual exclusion.** `--info` contradicts every
+  render-driving flag for the same reason `--raw` does —
+  they exist to drive a render, `--info` exists to skip
+  the render. The four combinations (`--info --live`,
+  `--info --follow`, `--info --max-frames`,
+  `--info --snapshot`, plus the new `--info --raw`) are
+  rejected at parse time (exit 2) with a clear stderr
+  message naming both flags.
+
+- **`--json` reuses.** `--json` is now valid with
+  `--list-backends` **or** `--info`; the previous
+  `--json requires --list-backends` message became
+  `--json requires --list-backends or --info`. The
+  `--json --info` JSON object is the same shape the
+  `describe_to_json()` helper produces, so a downstream
+  consumer can call the library function and the CLI
+  interchangeably.
+
+- **Tests.** 27 new tests in `tests/test_screen.py`:
+  - 10 `describe_capture` low-level tests (fake-with-grid
+    available, fake-without-grid unavailable, factory
+    `ValueError` tolerated, OS-backend returns `None`,
+    explicit region parsed + clamped, `"full"` case-
+    insensitive, out-of-range clamp, adapter `screen_size`
+    failure tolerated, region-parse-error keeps the dict
+    alive, default `get_capture_fn` is the real one).
+  - 2 `describe_to_text` tests (format with all five
+    fields filled; `-` placeholders for missing fields).
+  - 2 `describe_to_json` tests (round-trip through
+    `json.loads`, `None` fields preserved as `null`).
+  - 11 `main()` end-to-end tests (`--info` without
+    `--screen` is usage error, text mode against the
+    fake backend, JSON mode, unavailable backend
+    reports `available: no` and exits 0, explicit
+    `--region` flows into the output, three mutual-
+    exclusion rejections including a snapshot-write
+    guard, `--json` without a discovery flag is usage
+    error, malformed `--fake-grid` is usage error,
+    `--help` mentions `--info`).
+  - 2 `parse_args` tests (default off, flagged
+    composes with `--screen` / `--backend` / `--region`).
+
+- **Bookkeeping.** Regenerated all four static shell-
+  completion files (`completions/whisperpaw.{bash,zsh,
+  fish,nu}`) so `--info` shows up in Tab completion for
+  every shell. The byte-identity test in
+  `tests/test_completions.py` caught the drift and
+  forced the regen, as it has for every prior tick.
+
+- **Total: 540/540 green** (27 new + 513 existing).
+  Pure stdlib, no new pip deps, no telemetry, no
+  network. The new helpers live next to
+  `capture_screen_to_source` in `whisperpaw/_screen.py`
+  so the screen-capture public surface stays
+  co-located.
+
+- **Next tick.** With `--info` shipped, the
+  introspection story is complete — the user can now
+  see *what* backend they'd get, *whether* it's
+  available, the screen size, and the resolved region,
+  on any box, without going through a render. Natural
+  follow-ups: a fourth sound pack (still needs a
+  user request), the shared `to_json()` / describe
+  helper (a refactor across modules, deferred unless
+  someone asks), or the screen-magnifier overlay UX
+  (hotkeys, exit-on-key, transparent render — still a
+  2-3 tick project).

@@ -743,15 +743,34 @@ def build_parser() -> argparse.ArgumentParser:
     # ``add_screen_args`` so the parser stays readable.
     _screen.add_screen_args(parser)
     parser.add_argument(
+        "--info",
+        action="store_true",
+        dest="info",
+        help=(
+            "Print a short description of the screen-capture setup "
+            "this invocation would use (selected backend, whether "
+            "an adapter is available, the screen size, and the "
+            "resolved region) and exit 0 without capturing or "
+            "rendering anything. Requires --screen. Combine with "
+            "--json for a single-line parseable object. Mutually "
+            "exclusive with --live, --follow, --max-frames, "
+            "--snapshot, and --raw (all of them exist to drive a "
+            "render; --info answers the 'is this set up right?' "
+            "question instead)."
+        ),
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         dest="as_json",
         help=(
-            "Combine with --list-backends to emit a single-line "
-            "JSON object instead of one-name-per-line text. The "
-            "object has one key ('backends') whose value is the "
-            "list. Nothing is captured. Using --json without "
-            "--list-backends is a usage error (exit 2)."
+            "Combine with --list-backends (or --info) to emit a "
+            "single-line JSON object instead of the default text "
+            "output. --list-backends --json -> {'backends': [...]}; "
+            "--info --json -> {'backend': ..., 'available': ..., "
+            "'adapter': ..., 'screen_size': [w, h], 'region': "
+            "[x, y, w, h]}. Using --json without --list-backends "
+            "or --info is a usage error (exit 2)."
         ),
     )
     return parser
@@ -845,12 +864,43 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             file=sys.stderr,
         )
         raise SystemExit(2)
-    # --json only pairs with --list-backends. Anything else is
-    # ambiguous — an empty JSON object would be a worse failure
-    # mode than a clear stderr message.
-    if args.as_json and not args.list_backends:
+    # --info is the screen-capture "what would the pipeline do?"
+    # debug flag. It requires --screen (no point describing a
+    # capture setup when we're in text-source mode) and
+    # contradicts every other render-driving flag for the same
+    # reason --raw does: those flags exist to feed a render,
+    # --info exists to skip the render. We reject the
+    # combinations explicitly (exit 2) so a typo never
+    # silently no-ops.
+    if args.info:
+        if not args.screen:
+            print(
+                "paw-zoom: --info requires --screen "
+                "(it describes the screen-capture setup)",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        for flag, value in (
+            ("--live", args.live),
+            ("--follow", args.follow),
+            ("--max-frames", args.max_frames),
+            ("--snapshot", args.snapshot),
+            ("--raw", args.raw),
+        ):
+            if value:
+                print(
+                    f"paw-zoom: --info cannot be combined with {flag} "
+                    f"(--info is a metadata-only mode that exits "
+                    f"before any render)",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
+    # --json only pairs with --list-backends or --info. Anything
+    # else is ambiguous — an empty JSON object would be a worse
+    # failure mode than a clear stderr message.
+    if args.as_json and not (args.list_backends or args.info):
         print(
-            "paw-zoom: --json requires --list-backends",
+            "paw-zoom: --json requires --list-backends or --info",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -882,6 +932,41 @@ def main(argv: list[str] | None = None) -> int:
         else:
             for name in _screen.list_backends():
                 print(name)
+        return 0
+
+    # v0.2.1: --info is the screen-capture diagnostic
+    # short-circuit. It runs *before* the source-resolution
+    # block (so a missing OS adapter is reported as
+    # ``available: false`` rather than a fatal exit-1), uses
+    # the same ``describe_capture`` helper the library callers
+    # can use, and respects --json for the same single-line
+    # parseable shape the rest of the discovery flags use.
+    if args.info:
+        # --fake-grid is optional in --info mode: ``describe_capture``
+        # handles the "fake backend without a grid" case by
+        # reporting ``available: false`` (the same answer the
+        # user would get from the real --screen path), so a
+        # diagnostic run never lies about the setup. We still
+        # try to parse it if it's there so the dict's
+        # ``fake_grid`` shape matches what the real path would
+        # see — a malformed grid shows up as a usage error
+        # rather than a misleading "available: false" line.
+        fake_grid: list[str] | None = None
+        if args.fake_grid is not None:
+            try:
+                fake_grid = _screen._read_fake_grid(args.fake_grid)
+            except ValueError as exc:
+                print(f"paw-zoom: {exc}", file=sys.stderr)
+                return 2
+        info = _screen.describe_capture(
+            args.backend,
+            region=args.region,
+            fake_grid=fake_grid,
+        )
+        if args.as_json:
+            print(_screen.describe_to_json(info))
+        else:
+            print(_screen.describe_to_text(info))
         return 0
 
     # v0.2: --screen takes over source resolution. We bypass

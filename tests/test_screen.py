@@ -1082,3 +1082,486 @@ def test_main_screen_live_max_frames_bounds_run(
     # grid → change detector fires once, then idles), but the
     # loop must still have terminated cleanly with rc=0.
     assert "abc" in out
+
+
+# ---------------------------------------------------------------------------
+# describe_capture / describe_to_text / describe_to_json
+# ---------------------------------------------------------------------------
+
+
+def _fake_capture_factory(grid: list[str] | None):
+    """Build a ``get_capture_fn``-shaped callable that returns
+    a ``FakeScreen(grid)`` for ``backend='fake'`` and ``None``
+    for any other backend. Mirrors the ``fake_grid`` semantics
+    of the real factory.
+    """
+    def _factory(backend: str, *, fake_grid: list[str] | None = None):
+        if backend == "fake":
+            if fake_grid is None:
+                return None
+            return _screen.FakeScreen(fake_grid)
+        return None
+    return _factory
+
+
+def test_describe_capture_fake_with_grid_available() -> None:
+    """``describe_capture('fake', fake_grid=['abc', 'def'])``
+    reports the adapter as available, names ``FakeScreen``,
+    reports the screen size as (3, 2), and computes a full-
+    screen region as (0, 0, 3, 2).
+    """
+    info = _screen.describe_capture(
+        "fake",
+        fake_grid=["abc", "def"],
+        get_capture_fn=_fake_capture_factory(["abc", "def"]),
+    )
+    assert info == {
+        "backend": "fake",
+        "available": True,
+        "adapter": "FakeScreen",
+        "screen_size": [3, 2],
+        "region": [0, 0, 3, 2],
+    }
+
+
+def test_describe_capture_fake_without_grid_unavailable() -> None:
+    """A ``fake`` backend with no grid is reported as
+    unavailable: no adapter could be constructed, so the dict
+    stays empty on the size / region fields.
+    """
+    info = _screen.describe_capture(
+        "fake",
+        get_capture_fn=_fake_capture_factory(None),
+    )
+    assert info == {
+        "backend": "fake",
+        "available": False,
+        "adapter": None,
+        "screen_size": None,
+        "region": None,
+    }
+
+
+def test_describe_capture_unknown_backend_via_factory_error() -> None:
+    """A factory that raises ``ValueError`` (e.g. an unknown
+    backend or a missing fake_grid for ``fake``) is reported as
+    unavailable rather than propagated — ``describe_capture``
+    is a diagnostic, not a validator.
+    """
+    def _raising_factory(backend, *, fake_grid=None):
+        raise ValueError("nope")
+
+    info = _screen.describe_capture("x11", get_capture_fn=_raising_factory)
+    assert info["available"] is False
+    assert info["adapter"] is None
+    assert info["screen_size"] is None
+    assert info["region"] is None
+    assert info["backend"] == "x11"
+
+
+def test_describe_capture_os_backend_returns_none() -> None:
+    """``describe_capture('x11', ...)`` on a headless box (the
+    factory returns ``None``) reports the backend as unavailable
+    and leaves the size / region fields empty.
+    """
+    info = _screen.describe_capture(
+        "x11",
+        get_capture_fn=lambda backend, *, fake_grid=None: None,
+    )
+    assert info["backend"] == "x11"
+    assert info["available"] is False
+    assert info["adapter"] is None
+    assert info["screen_size"] is None
+    assert info["region"] is None
+
+
+def test_describe_capture_with_explicit_region() -> None:
+    """An explicit ``--region`` is parsed and clamped to the
+    reported screen size.
+    """
+    info = _screen.describe_capture(
+        "fake",
+        region="0,0,2,1",
+        fake_grid=["abc", "def"],
+        get_capture_fn=_fake_capture_factory(["abc", "def"]),
+    )
+    assert info["available"] is True
+    assert info["screen_size"] == [3, 2]
+    assert info["region"] == [0, 0, 2, 1]
+
+
+def test_describe_capture_with_region_string_full() -> None:
+    """``--region full`` (case-insensitive) means the whole screen.
+    """
+    info = _screen.describe_capture(
+        "fake",
+        region="FULL",
+        fake_grid=["abcdef", "ghijkl"],
+        get_capture_fn=_fake_capture_factory(["abcdef", "ghijkl"]),
+    )
+    assert info["region"] == [0, 0, 6, 2]
+
+
+def test_describe_capture_with_region_string_out_of_range_clamps() -> None:
+    """A region past the bottom-right edge is clamped to the screen.
+    """
+    info = _screen.describe_capture(
+        "fake",
+        region="2,1,99,99",
+        fake_grid=["abc", "def"],
+        get_capture_fn=_fake_capture_factory(["abc", "def"]),
+    )
+    assert info["screen_size"] == [3, 2]
+    assert info["region"] == [2, 1, 1, 1]
+
+
+def test_describe_capture_adapter_screen_size_failure_tolerated() -> None:
+    """An adapter that constructs but blows up in
+    ``screen_size()`` is still reported as available — the
+    exception is swallowed so the diagnostic still tells the
+    user *which* adapter was picked, and only the size field
+    is left empty.
+    """
+    class _BrokenAdapter(_screen.ScreenCapture):
+        def screen_size(self):
+            raise RuntimeError("nope")
+
+        def capture(self, *, x, y, w, h):
+            return []
+
+    def _factory(backend, *, fake_grid=None):
+        if backend == "fake":
+            return _BrokenAdapter()
+        return None
+
+    info = _screen.describe_capture("fake", get_capture_fn=_factory)
+    assert info["available"] is True
+    assert info["adapter"] == "_BrokenAdapter"
+    assert info["screen_size"] is None
+    assert info["region"] is None
+
+
+def test_describe_capture_region_parsing_error_keeps_dict_alive() -> None:
+    """A region the parser would normally reject (e.g. a
+    negative component) does not crash the diagnostic — the
+    region field is left as ``None`` and the rest of the
+    dict still answers the user's question.
+    """
+    info = _screen.describe_capture(
+        "fake",
+        region="0,0,-1,1",
+        fake_grid=["abc", "def"],
+        get_capture_fn=_fake_capture_factory(["abc", "def"]),
+    )
+    assert info["available"] is True
+    assert info["screen_size"] == [3, 2]
+    assert info["region"] is None
+
+
+def test_describe_to_text_format() -> None:
+    """The text output is five ``key: value`` lines in a fixed
+    order, with ``screen_size`` formatted as ``WxH`` and
+    ``region`` as ``X,Y,W,H``.
+    """
+    info = {
+        "backend": "fake",
+        "available": True,
+        "adapter": "FakeScreen",
+        "screen_size": [80, 24],
+        "region": [0, 0, 80, 24],
+    }
+    text = _screen.describe_to_text(info)
+    assert text == "\n".join(
+        [
+            "backend: fake",
+            "available: yes",
+            "adapter: FakeScreen",
+            "screen_size: 80x24",
+            "region: 0,0,80,24",
+        ]
+    )
+
+
+def test_describe_to_text_unavailable_uses_dashes() -> None:
+    """When a field is missing (e.g. an unavailable OS adapter
+    that never reports a size), the text output uses ``-`` so
+    the line layout is still predictable for a downstream
+    grep / awk.
+    """
+    info = {
+        "backend": "x11",
+        "available": False,
+        "adapter": None,
+        "screen_size": None,
+        "region": None,
+    }
+    text = _screen.describe_to_text(info)
+    assert text == "\n".join(
+        [
+            "backend: x11",
+            "available: no",
+            "adapter: -",
+            "screen_size: -",
+            "region: -",
+        ]
+    )
+
+
+def test_describe_to_json_round_trip() -> None:
+    """The JSON output round-trips through ``json.loads`` and
+    exposes the screen_size / region as JSON arrays.
+    """
+    info = {
+        "backend": "fake",
+        "available": True,
+        "adapter": "FakeScreen",
+        "screen_size": [3, 2],
+        "region": [0, 0, 3, 2],
+    }
+    raw = _screen.describe_to_json(info)
+    assert "\n" not in raw
+    parsed = json.loads(raw)
+    assert parsed == info
+
+
+def test_describe_to_json_with_none_fields() -> None:
+    """The JSON output preserves ``None`` fields as ``null``
+    so a downstream consumer can tell the adapter was queried
+    but didn't return a value.
+    """
+    info = {
+        "backend": "x11",
+        "available": False,
+        "adapter": None,
+        "screen_size": None,
+        "region": None,
+    }
+    parsed = json.loads(_screen.describe_to_json(info))
+    assert parsed["screen_size"] is None
+    assert parsed["region"] is None
+    assert parsed["available"] is False
+
+
+def test_describe_capture_default_get_capture_is_real(monkeypatch) -> None:
+    """With no ``get_capture_fn`` override, ``describe_capture``
+    uses the real module-level :func:`get_capture`. This
+    pins down the contract: on a headless box the real
+    factory returns ``None`` for OS backends, and the dict
+    reflects that.
+    """
+    info = _screen.describe_capture("x11")
+    assert info["backend"] == "x11"
+    # No $DISPLAY on this CI box → no X11 adapter → unavailable.
+    assert info["available"] is False
+
+
+# ---------------------------------------------------------------------------
+# paw-zoom --info (CLI integration)
+# ---------------------------------------------------------------------------
+
+
+def test_main_info_requires_screen(capsys) -> None:
+    """``paw-zoom --info`` without ``--screen`` is a usage
+    error (exit 2 with a clear stderr message).
+    """
+    rc = zoom.main(["--info"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--info requires --screen" in captured.err
+
+
+def test_main_info_text_mode_with_fake_backend(capsys) -> None:
+    """``paw-zoom --info --screen --backend fake --fake-grid
+    'abc\\ndef'`` prints the five-line text description and
+    exits 0 without any screen capture or rendering.
+    """
+    rc = zoom.main(
+        [
+            "--info",
+            "--screen",
+            "--backend",
+            "fake",
+            "--fake-grid",
+            "abc\ndef",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "backend: fake" in out.out
+    assert "available: yes" in out.out
+    assert "adapter: FakeScreen" in out.out
+    assert "screen_size: 3x2" in out.out
+    assert "region: 0,0,3,2" in out.out
+
+
+def test_main_info_json_mode(capsys) -> None:
+    """``paw-zoom --info --json --screen --backend fake
+    --fake-grid 'abc\\ndef'`` prints a single-line parseable
+    JSON object with the same five fields.
+    """
+    rc = zoom.main(
+        [
+            "--info",
+            "--json",
+            "--screen",
+            "--backend",
+            "fake",
+            "--fake-grid",
+            "abc\ndef",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "\n" not in out.out.rstrip("\n")
+    parsed = json.loads(out.out)
+    assert parsed == {
+        "backend": "fake",
+        "available": True,
+        "adapter": "FakeScreen",
+        "screen_size": [3, 2],
+        "region": [0, 0, 3, 2],
+    }
+
+
+def test_main_info_unavailable_backend_does_not_exit_1(capsys) -> None:
+    """``paw-zoom --info --screen --backend x11`` on a headless
+    box reports ``available: no`` and exits 0 — the whole
+    point of ``--info`` is "what would happen?", not "do
+    the thing".
+    """
+    rc = zoom.main(["--info", "--screen", "--backend", "x11"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "backend: x11" in out.out
+    assert "available: no" in out.out
+    assert "adapter: -" in out.out
+    assert "screen_size: -" in out.out
+
+
+def test_main_info_with_explicit_region(capsys) -> None:
+    """``--info --region X,Y,W,H`` resolves the region and
+    shows it in the output.
+    """
+    rc = zoom.main(
+        [
+            "--info",
+            "--screen",
+            "--backend",
+            "fake",
+            "--fake-grid",
+            "abc\ndef",
+            "--region",
+            "1,0,2,1",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "region: 1,0,2,1" in out.out
+
+
+def test_main_info_mutual_exclusion_with_live(capsys) -> None:
+    """``--info --live`` is rejected (exit 2): --info is a
+    metadata-only mode, --live is a render driver.
+    """
+    rc = zoom.main(
+        [
+            "--info",
+            "--screen",
+            "--live",
+            "--max-frames",
+            "1",
+            "--interval",
+            "0.001",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--info cannot be combined with --live" in captured.err
+
+
+def test_main_info_mutual_exclusion_with_raw(capsys) -> None:
+    """``--info --raw`` is rejected (exit 2). Same rationale.
+    """
+    rc = zoom.main(["--info", "--screen", "--raw"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--info cannot be combined with --raw" in captured.err
+
+
+def test_main_info_mutual_exclusion_with_snapshot(capsys) -> None:
+    """``--info --snapshot`` is rejected (exit 2).
+    """
+    rc = zoom.main(
+        ["--info", "--screen", "--snapshot", "/tmp/should_not_be_written.txt"]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--info cannot be combined with --snapshot" in captured.err
+    # Sanity: the snapshot file must NOT have been written.
+    import os
+    assert not os.path.exists("/tmp/should_not_be_written.txt")
+
+
+def test_main_info_json_without_discovery_flag_is_usage_error(capsys) -> None:
+    """``--json`` without ``--list-backends`` or ``--info`` is
+    a usage error (exit 2) — the same fail-fast the
+    ``--list-backends --json`` combo used to do.
+    """
+    rc = zoom.main(["--json"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert (
+        "--json requires --list-backends or --info" in captured.err
+    )
+
+
+def test_main_info_with_malformed_fake_grid_is_usage_error(capsys) -> None:
+    """``--info --fake-grid ''`` (an empty fake grid) is
+    rejected at the parse-fake-grid boundary with a clear
+    message, not silently reported as ``available: no``.
+    """
+    rc = zoom.main(
+        [
+            "--info",
+            "--screen",
+            "--backend",
+            "fake",
+            "--fake-grid",
+            "",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--fake-grid" in captured.err
+
+
+def test_main_info_help_text_mentions_flag(capsys) -> None:
+    """The ``--help`` text mentions ``--info`` so a casual
+    ``paw-zoom --help`` user discovers it. Catches accidental
+    renames.
+    """
+    rc = zoom.main(["--help"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "--info" in out.out
+
+
+def test_parse_args_info_default_is_false() -> None:
+    """``--info`` defaults to off (the existing behaviour is
+    unchanged unless the flag is passed).
+    """
+    args = zoom.parse_args(["hello"])
+    assert args.info is False
+
+
+def test_parse_args_info_flag() -> None:
+    """``--info`` parses to ``True`` and composes with
+    ``--screen`` / ``--backend`` / ``--region``.
+    """
+    args = zoom.parse_args(
+        ["--info", "--screen", "--backend", "fake", "--region", "0,0,10,5"]
+    )
+    assert args.info is True
+    assert args.screen is True
+    assert args.backend == "fake"
+    assert args.region == "0,0,10,5"

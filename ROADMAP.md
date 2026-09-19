@@ -27,7 +27,7 @@ This document is the **single source of truth** for what WhisperPaw will be and 
 | `paw-read`  | ✅ shipped | Read text aloud (stdin / file / clipboard). |
 | `paw-watch` | ✅ shipped | Tail a command and speak new lines. |
 | `paw-complete` | ✅ shipped | Print shell completions (bash / zsh / fish / nushell) for every shipped tool, derived live from each tool's argparse parser. |
-| `paw-zoom`  | ✅ shipped (v0.2) | Magnify a rectangular region of text or of the **screen** (v0.2). v0.1 was an ASCII text-viewport POC; v0.2 adds a `ScreenCapture` adapter protocol, a `FakeScreen` reference implementation, and CLI flags (`--screen`, `--region X,Y,W,H`, `--backend {auto,fake,x11,win32,quartz}`, `--fake-grid`, `--list-backends`, `--json`). The OS-specific adapters (X11 / Win32 / **Quartz**) ship as real implementations on their respective platforms; the data shape and the rest of the pipeline are real today. |
+| `paw-zoom`  | ✅ shipped (v0.2) | Magnify a rectangular region of text or of the **screen** (v0.2). v0.1 was an ASCII text-viewport POC; v0.2 adds a `ScreenCapture` adapter protocol, a `FakeScreen` reference implementation, and CLI flags (`--screen`, `--region X,Y,W,H`, `--backend {auto,fake,x11,win32,quartz}`, `--fake-grid`, `--list-backends`, `--info`, `--json`). The OS-specific adapters (X11 / Win32 / **Quartz**) ship as real implementations on their respective platforms; the data shape and the rest of the pipeline are real today. |
 
 Legend: 🐣 planned · 🛠 in progress · ✅ shipped · 🐛 buggy
 
@@ -205,7 +205,7 @@ CLI: ``paw-zoom [TEXT] [--file PATH] [--rows N] [--cols N]
 [--charset space|hash|dot] [--quiet] [--snapshot PATH]
 [--live] [--interval SECS] [--follow] [--max-frames N] [--raw]
 [--screen] [--region X,Y,W,H] [--backend {auto,fake,x11,win32,quartz}]
-[--fake-grid TEXT] [--list-backends] [--json]``.
+[--fake-grid TEXT] [--list-backends] [--info] [--json]``.
 
 Exit codes: 0 ok, 1 ``--file`` not found, 2 usage / no source /
 invalid args.
@@ -305,6 +305,20 @@ message that names the backend and points the user at
   line, exit 0. Short-circuits before any capture.
 * ``--json`` — combine with ``--list-backends`` to emit a
   single-line, parseable ``{"backends": [...]}`` object instead.
+* ``--info`` — print a 5-line description of the screen-capture
+  setup this invocation would use (selected backend, whether
+  an adapter is available on this OS, the resolved adapter
+  class name, the screen size in cells, and the resolved
+  ``X,Y,W,H`` region) and exit 0 without capturing anything.
+  Designed to answer "is my screen-capture set up right?" on
+  any box — including a headless one, where the answer is
+  ``available: no`` instead of a fatal exit-1. Requires
+  ``--screen``; mutually exclusive with ``--live`` /
+  ``--follow`` / ``--max-frames`` / ``--snapshot`` / ``--raw``
+  (all of them exist to drive a render; ``--info`` is
+  metadata-only). Combine with ``--json`` for the same
+  single-line parseable shape ``--list-backends --json``
+  uses.
 
 **Discovery helpers** (the same data the CLI prints, exposed as
 plain functions so ``paw-complete`` and tests don't have to
@@ -314,6 +328,24 @@ reach into the parser):
   ``["fake", "x11", "win32", "quartz"]`` (canonical order).
 * :func:`whisperpaw._screen.to_json("backends")` — the exact
   single-line JSON string the CLI emits with ``--json``.
+* :func:`whisperpaw._screen.describe_capture(backend, *,
+  region, fake_grid, get_capture_fn)` — returns a 5-key
+  metadata dict (``backend`` / ``available`` / ``adapter`` /
+  ``screen_size`` / ``region``). ``get_capture_fn`` is the
+  injection point so tests don't have to monkey-patch the
+  module-level :func:`get_capture` global. The function is
+  intentionally non-raising: a missing adapter is reported as
+  ``available: false`` so the diagnostic always answers
+  the user's question instead of crashing.
+* :func:`whisperpaw._screen.describe_to_text(info)` — the
+  fixed-order ``key: value`` text rendering ``--info``
+  prints. ``-`` for missing fields so the line layout is
+  predictable for a downstream grep / awk.
+* :func:`whisperpaw._screen.describe_to_json(info)` — the
+  single-line parseable JSON object ``--info --json``
+  prints. Round-trips through ``json.loads``; emits
+  ``screen_size`` and ``region`` as JSON arrays so downstream
+  tooling can index them positionally.
 
 **The v0.1 → v0.2 split, by design**. v0.1 nailed the *text
 viewport* math, the magnification primitive, the source
@@ -429,6 +461,7 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-18 — paw-sound: wire --volume to the per-stream-capable audio backends. afplay now takes `-v VALUE` (pass-through in [0.0, 1.0]); paplay takes `--volume=N` scaled to a 16-bit unsigned int in [0, 65535] via int(round(v * 65535)) with defensive clamp. aplay (ALSA) and PowerShell SoundPlayer silently drop the value because they have no per-stream knob (aplay would need a separate `amixer` call; SoundPlayer is fixed-gain). New public `volume_supported(backend_name)` + `current_backend_name()` helpers (pure, derive from the same `shutil.which` ladder as `pick_backend` so they cannot drift). `--help` text expanded to call out which backends honour the flag. 15 new tests, 483/483 green. Static completion files unchanged (flag already shipped; only the help text expanded).
 - 2026-09-18 — paw-zoom v0.2: wire --screen --live end-to-end. New `_tail_screen_and_render` helper (sibling of `_tail_and_render`) re-captures the screen on every poll and re-renders the magnified viewport when the captured text changes. Composes with --follow / --max-frames / --snapshot / --interval — same sink plumbing the text-source tail uses. --live now accepts --file *or* --screen (the previous gate required --file). 16 new tests in test_screen.py (FakeScreen end-to-end, mutation-driven change detection, capture_fn / has_changed injection points, ValueError + RuntimeError resilience, --follow on the captured tail, --max-frames cap, --snapshot write, --backend x11 --screen --live exits 1 on a headless box, parse_args loosening). 498/498 green. Static completion files regenerated (--live help text changed).
 - 2026-09-18 — paw-zoom: add --raw flag (dump the source — text or screen — to stdout verbatim, no magnification). Mutually exclusive with --live / --follow / --max-frames / --snapshot at parse time (exit 2). The viewport-modifying flags (--zoom / --rows / --cols / --offset / --col-offset / --charset) are silently ignored in --raw mode so a shell alias can keep them. --quiet suppresses the opt-in stderr one-liner. 15 new tests in test_zoom.py (default/flagged, four mutual-exclusion rejections, positional / --file / --screen / --screen --region dumps, --quiet suppression, --raw on a headless box, --raw without a source, silent viewport-flag ignoring). 513/513 green. Static completion files regenerated.
+- 2026-09-19 — paw-zoom: add --info flag (screen-capture diagnostic). New public helpers in `whisperpaw._screen`: `describe_capture(backend, region, fake_grid, get_capture_fn)` returns a 5-key metadata dict (backend / available / adapter / screen_size / region); `describe_to_text(info)` renders it as 5 fixed-order `key: value` lines; `describe_to_json(info)` emits the same shape as a single-line parseable JSON object. The CLI flag --info requires --screen (a usage error otherwise) and is mutually exclusive with --live / --follow / --max-frames / --snapshot / --raw (exit 2). --info --json combines them; --json is also now valid with --list-backends. The flag short-circuits in main() before the source-resolution block so a missing OS adapter is reported as `available: no` rather than a fatal exit-1. 27 new tests in test_screen.py (describe_capture fake / unavailable / factory-ValueError / OS-backend / explicit region / "full" / out-of-range clamp / adapter screen_size failure / region-parsing error; describe_to_text format / dash placeholders; describe_to_json round-trip / None preservation; main --info requires --screen / text mode / JSON mode / unavailable / explicit region / 3 mutual-exclusion rejections / JSON-without-discovery / malformed fake-grid / help text; parse_args default + flag). 540/540 green. Static completion files regenerated.
 <!-- TICK-LOG-END -->
 
 (Updated 2026-09-17: `paw-zoom` v0.2 ships the screen-capture

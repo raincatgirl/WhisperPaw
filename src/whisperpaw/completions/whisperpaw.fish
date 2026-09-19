@@ -59,4 +59,5 @@ complete -c paw-zoom -l region -d 'Screen rectangle to capture when --screen is 
 complete -c paw-zoom -l backend -d 'Screen-capture backend to use when --screen is set (default: auto — picks the f…'
 complete -c paw-zoom -l fake-grid -d 'With --backend fake, the text used as the \'screen\' (rows separated by \'\n\').'
 complete -c paw-zoom -l list-backends -d 'Print the names of every supported screen-capture backend, one per line, and ex…'
-complete -c paw-zoom -l json -d 'Combine with --list-backends to emit a single-line JSON object instead of one-n…'
+complete -c paw-zoom -l info -d 'Print a short description of the screen-capture setup this invocation would use…'
+complete -c paw-zoom -l json -d 'Combine with --list-backends (or --info) to emit a single-line JSON object inst…'

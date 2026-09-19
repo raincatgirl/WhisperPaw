@@ -77,6 +77,7 @@ _paw_zoom() {
     '--backend[Screen-capture backend to use when --screen is set (default: auto — picks the f…]' \
     '--fake-grid[With --backend fake, the text used as the ''screen'' (rows separated by ''\n'').]' \
     '--list-backends[Print the names of every supported screen-capture backend, one per line, and ex…]' \
-    '--json[Combine with --list-backends to emit a single-line JSON object instead of one-n…]'
+    '--info[Print a short description of the screen-capture setup this invocation would use…]' \
+    '--json[Combine with --list-backends (or --info) to emit a single-line JSON object inst…]'
 }
 _paw_zoom "$@"

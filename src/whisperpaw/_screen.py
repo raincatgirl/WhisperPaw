@@ -485,6 +485,126 @@ def backend_unsupported_message(backend: str) -> str:
     )
 
 
+def describe_capture(
+    backend: str = "auto",
+    *,
+    region: str | None = None,
+    fake_grid: list[str] | None = None,
+    get_capture_fn: Any = None,
+) -> dict[str, Any]:
+    """Return a small metadata dict describing the screen-capture setup.
+
+    The output is what ``paw-zoom --info`` (and ``--info --json``)
+    surface. It has the following keys, all present:
+
+    * ``backend`` — the requested backend name (``"auto"``, ``"fake"``,
+      ``"x11"``, ``"win32"``, ``"quartz"``).
+    * ``available`` — whether a :class:`ScreenCapture` adapter could
+      actually be constructed on this OS. ``True`` for ``"fake"`` with
+      a grid; ``True`` on a real desktop for the matching OS adapter;
+      ``False`` otherwise.
+    * ``adapter`` — the resolved adapter class name (e.g.
+      ``"FakeScreen"``, ``"X11Screen"``) or ``None`` when unavailable.
+    * ``screen_size`` — ``[width, height]`` if the adapter reported a
+      size; ``None`` otherwise.
+    * ``region`` — the resolved ``[x, y, w, h]`` after
+      :func:`capture_screen_to_source` clamping, or ``None`` when the
+      adapter is unavailable.
+
+    The function is intentionally pure: it does not raise on a
+    missing backend. The CLI's ``--info`` is "what would the
+    pipeline do?" — failing hard here would defeat the point of the
+    flag (debugging "why doesn't --screen work on this box?").
+
+    The ``get_capture_fn`` parameter is an injection point so tests
+    don't have to monkey-patch the module-level
+    :func:`get_capture` global. It defaults to the real
+    :func:`get_capture`.
+    """
+    if get_capture_fn is None:
+        get_capture_fn = get_capture
+    info: dict[str, Any] = {
+        "backend": backend,
+        "available": False,
+        "adapter": None,
+        "screen_size": None,
+        "region": None,
+    }
+    try:
+        cap = get_capture_fn(backend, fake_grid=fake_grid)
+    except ValueError:
+        # An unknown backend or a missing fake_grid. The CLI has
+        # already validated --backend and --fake-grid at parse time,
+        # so this only fires if a caller wires ``--info`` into a
+        # state parse_args would have rejected. We surface the
+        # unavailable status and let the caller decide.
+        return info
+    if cap is None:
+        return info
+    info["available"] = True
+    info["adapter"] = type(cap).__name__
+    try:
+        w, h = cap.screen_size()
+    except Exception:
+        # An adapter that advertises availability but whose
+        # screen_size() call fails at runtime is still
+        # "available" — the dict just can't fill in a size. This
+        # is the right shape for diagnostics: "the adapter is
+        # there, but something went wrong probing it".
+        return info
+    info["screen_size"] = [int(w), int(h)]
+    if region is None:
+        info["region"] = [0, 0, int(w), int(h)]
+        return info
+    try:
+        x, y, rw, rh = _parse_region(region, screen_size=(w, h))
+    except ValueError:
+        # A region the parser would have accepted but that
+        # _parse_region still rejects (e.g. negative w/h) — leave
+        # the region as None so the user sees "we couldn't
+        # compute it" rather than a wrong answer.
+        return info
+    info["region"] = [int(x), int(y), int(rw), int(rh)]
+    return info
+
+
+def describe_to_text(info: dict[str, Any]) -> str:
+    """Render :func:`describe_capture`'s dict as a human-readable string.
+
+    One ``key: value`` per line, in a fixed order, so the output is
+    diffable and easy to grep. The ``screen_size`` and ``region``
+    tuples are formatted as ``"WIDTHxHEIGHT"`` and
+    ``"X,Y,W,H"`` respectively to match the conventions the rest
+    of the project uses for the same data.
+    """
+    lines: list[str] = []
+    lines.append(f"backend: {info.get('backend')!s}")
+    lines.append(f"available: {'yes' if info.get('available') else 'no'}")
+    lines.append(f"adapter: {info.get('adapter') or '-'}")
+    size = info.get("screen_size")
+    if size is not None:
+        lines.append(f"screen_size: {size[0]}x{size[1]}")
+    else:
+        lines.append("screen_size: -")
+    region = info.get("region")
+    if region is not None:
+        lines.append(f"region: {region[0]},{region[1]},{region[2]},{region[3]}")
+    else:
+        lines.append("region: -")
+    return "\n".join(lines)
+
+
+def describe_to_json(info: dict[str, Any]) -> str:
+    """Return :func:`describe_capture`'s dict as a single-line JSON string.
+
+    Same shape as the dict (no flattening), single line, parseable
+    by ``json.loads`` / ``jq``. ``screen_size`` and ``region``
+    are emitted as JSON arrays (``[w, h]`` / ``[x, y, w, h]``) so
+    downstream tooling can index them positionally.
+    """
+    return json.dumps(info, ensure_ascii=False)
+
+
 def _read_fake_grid(text: str) -> list[str]:
     """Turn a ``--fake-grid`` CLI string into the list-of-strings
     shape :class:`FakeScreen` wants.
@@ -516,6 +636,9 @@ __all__ = [
     "get_capture",
     "list_backends",
     "to_json",
+    "describe_capture",
+    "describe_to_text",
+    "describe_to_json",
     "capture_screen_to_source",
     "backend_unsupported_message",
 ]
