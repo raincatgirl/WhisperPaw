@@ -3150,3 +3150,399 @@ def test_sha_default_sha_algo_appears_in_help() -> None:
     # "default: SHA-256" — either is fine; we just want
     # the algorithm name visible.
     assert "sha256" in help_text.lower()
+
+
+# ---------------------------------------------------------------------------
+# --line-numbers
+# ---------------------------------------------------------------------------
+
+
+def test_format_line_numbers_basic() -> None:
+    """``_format_line_numbers`` prepends a per-source-row number
+    to each magnified line. The gutter ("   N │ ") is the
+    same shape ``cat -n`` / ``nl`` / most editors use: a
+    4-char right-aligned row number, then a space, then a
+    vertical bar, then a space. Zoom is 2, so each source
+    row is repeated twice in the rendered output and the
+    prefix repeats with it.
+    """
+    rendered = "aabb\n" "aabb\n" "ccdd\n" "ccdd"
+    out = zoom._format_line_numbers(
+        rendered, zoom=2, first_source_row=1
+    )
+    assert out == (
+        "   1 │ aabb\n"
+        "   1 │ aabb\n"
+        "   2 │ ccdd\n"
+        "   2 │ ccdd"
+    )
+
+
+def test_format_line_numbers_empty() -> None:
+    """An empty ``rendered`` is a no-op — returns ``""``
+    unchanged. The ``--raw`` and the no-frame case both rely
+    on this; if the helper ever started padding the empty
+    string with a gutter, both code paths would gain a
+    spurious blank line."""
+    assert (
+        zoom._format_line_numbers("", zoom=1, first_source_row=1)
+        == ""
+    )
+    assert (
+        zoom._format_line_numbers("", zoom=3, first_source_row=42)
+        == ""
+    )
+
+
+def test_format_line_numbers_zoom_1() -> None:
+    """At ``zoom=1`` each magnified line is one source row,
+    so the prefix increments on every line (1, 2, 3, …).
+    The grouping math still works — there's one magnified
+    line per group, so the per-line prefix is just
+    ``f"{row}{gutter}{line}"``.
+    """
+    rendered = "ab\n" "cd\n" "ef"
+    out = zoom._format_line_numbers(
+        rendered, zoom=1, first_source_row=1
+    )
+    assert out == (
+        "   1 │ ab\n"
+        "   2 │ cd\n"
+        "   3 │ ef"
+    )
+
+
+def test_format_line_numbers_offset() -> None:
+    """``first_source_row`` shifts the numbering. The first
+    source row in view is ``first_source_row`` (1-based), so
+    ``paw-zoom --offset 12 --line-numbers …`` produces
+    prefixes starting at ``13`` (matching what ``cat -n``
+    would show for the same source-line). The width is
+    constant (4 chars) so a 9999-line file still lines up
+    under a 1-line viewport.
+    """
+    rendered = "x\n" "x\n" "y\n" "y"
+    out = zoom._format_line_numbers(
+        rendered, zoom=2, first_source_row=13
+    )
+    assert out == (
+        "  13 │ x\n"
+        "  13 │ x\n"
+        "  14 │ y\n"
+        "  14 │ y"
+    )
+
+
+def test_format_line_numbers_custom_width() -> None:
+    """The ``width`` and ``gutter`` kwargs override the
+    defaults. A tighter gutter (just a single space and a
+    thin vertical bar) is sometimes easier to read on a
+    narrow terminal; a wider gutter is sometimes easier
+    on a busy screen. Both are pure-style overrides; the
+    math (grouping, numbering) is unchanged.
+    """
+    rendered = "a\n" "a\n" "b"
+    out = zoom._format_line_numbers(
+        rendered, zoom=2, first_source_row=1, width=2, gutter="|"
+    )
+    assert out == (" 1|a\n" " 1|a\n" " 2|b")
+
+
+def test_format_line_numbers_defensive_zoom() -> None:
+    """A non-positive ``zoom`` can't be grouped, so the
+    function falls back to numbering every line
+    sequentially. This is a defensive boundary check —
+    ``parse_args`` rejects ``--zoom 0`` at the CLI level,
+    but the library function is callable from anywhere, so
+    the re-validation belongs at the boundary. A user who
+    somehow gets here gets *some* annotation, just not the
+    grouped one.
+    """
+    rendered = "a\n" "b\n" "c"
+    out = zoom._format_line_numbers(
+        rendered, zoom=0, first_source_row=10
+    )
+    assert out == ("  10 │ a\n" "  11 │ b\n" "  12 │ c")
+
+
+def test_format_line_numbers_negative_first_row_clamps() -> None:
+    """A negative ``first_source_row`` is treated as
+    ``1`` by the caller's ``max(1, …)`` clamp — the
+    helper itself doesn't clamp, but the production
+    wiring does. Verify the helper produces a valid
+    format string for the clamped value (so a stray
+    negative ``--offset`` doesn't crash the renderer).
+    """
+    # The library helper does not clamp (it formats
+    # whatever it's given); a negative value yields a
+    # negative prefix. The caller's ``max(1, …)`` is the
+    # contract that prevents the negative value from
+    # ever reaching this code in production. We assert
+    # the format is well-defined so a future refactor
+    # of the helper doesn't accidentally regress to
+    # raising on negative input.
+    rendered = "a"
+    out = zoom._format_line_numbers(
+        rendered, zoom=1, first_source_row=-5
+    )
+    # The number is whatever the caller passed in; the
+    # format is right-aligned in 4 chars.
+    assert out == "  -5 │ a"
+
+
+def test_parse_args_line_numbers_default_off() -> None:
+    """``--line-numbers`` defaults to ``False`` so a
+    vanilla ``paw-zoom …`` keeps its current output shape
+    — no gutter, no behaviour change for users who didn't
+    ask for the annotation."""
+    args = zoom.parse_args(["hello"])
+    assert args.line_numbers is False
+
+
+def test_parse_args_line_numbers_flag() -> None:
+    """``--line-numbers`` is a ``store_true`` flag —
+    passing it once flips the attribute to ``True``."""
+    args = zoom.parse_args(["--line-numbers", "hello"])
+    assert args.line_numbers is True
+
+
+def test_main_line_numbers_renders_with_gutter(capsys) -> None:
+    """End-to-end: ``paw-zoom --line-numbers …`` emits a
+    magnified viewport with the per-source-row gutter
+    prepended. The default gutter width (4 chars + `` | ``)
+    is visible on every magnified line; the row number
+    starts at ``1`` for a vanilla positional source.
+    """
+    rc = zoom.main(
+        [
+            "--rows",
+            "3",
+            "--cols",
+            "3",
+            "--zoom",
+            "1",
+            "--line-numbers",
+            "abc\ndef\nghi",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    # Zoom 1 → no repetition; gutter on every line. The
+    # announcement is on stdout (not stderr), so the first
+    # line of out.out is the banner — we drop it and
+    # compare only the guttered viewport.
+    lines = out.out.splitlines()
+    assert lines[0].startswith("🐾 paw-zoom:")
+    assert lines[1:] == [
+        "   1 │ abc",
+        "   2 │ def",
+        "   3 │ ghi",
+    ]
+
+
+def test_main_line_numbers_offset_shifts_numbering(capsys) -> None:
+    """``--line-numbers`` combined with ``--offset N``:
+    the first source row in view is ``N + 1`` (1-based),
+    so the gutter numbers start at that value. Same
+    source, two different offsets, two different
+    numbering series — the user can correlate the
+    rendered block with the source.
+    """
+    # 15 lines so ``--offset 12`` is in range and the
+    # viewport shows source lines 13, 14, 15. ``cols=6`` is
+    # wide enough for ``line13`` (6 chars).
+    src = "\n".join(f"line{i}" for i in range(1, 16))
+    rc = zoom.main(
+        [
+            "--rows",
+            "3",
+            "--cols",
+            "6",
+            "--zoom",
+            "1",
+            "--offset",
+            "12",
+            "--line-numbers",
+            src,
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    lines = out.out.splitlines()
+    assert lines[0].startswith("🐾 paw-zoom:")
+    assert lines[1:] == [
+        "  13 │ line13",
+        "  14 │ line14",
+        "  15 │ line15",
+    ]
+
+
+def test_main_line_numbers_zoom_2_repeats_number(capsys) -> None:
+    """With ``--zoom 2``, each source row is repeated
+    twice in the rendered output, and ``--line-numbers``
+    repeats the row number with it (so the gutter reads
+    ``1 │ xxxx\\n1 │ xxxx\\n2 │ yyyy\\n2 │ yyyy`` — the
+    per-source-row number, not the per-magnified-line
+    number). The grouping math lives in
+    ``_format_line_numbers``; this test pins the
+    end-to-end shape."""
+    rc = zoom.main(
+        [
+            "--rows",
+            "2",
+            "--cols",
+            "2",
+            "--zoom",
+            "2",
+            "--line-numbers",
+            "ab\ncd",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    # Source row 1 (ab) → aabb / aabb, gutter "1".
+    # Source row 2 (cd) → ccdd / ccdd, gutter "2".
+    lines = out.out.splitlines()
+    assert lines[0].startswith("🐾 paw-zoom:")
+    assert lines[1:] == [
+        "   1 │ aabb",
+        "   1 │ aabb",
+        "   2 │ ccdd",
+        "   2 │ ccdd",
+    ]
+
+
+def test_main_line_numbers_does_not_change_announcement(capsys) -> None:
+    """``--line-numbers`` is a *render-time* annotation,
+    not a discovery flag, so the announcement line still
+    fires (``--quiet`` is not set) and reports the
+    normal ``rows × cols window, zoom N, output …``
+    shape. The gutter is added on top of the rendered
+    viewport, so the announcement's ``output`` size
+    reflects the magnified dimensions (not the
+    gutter-inflated ones)."""
+    rc = zoom.main(
+        [
+            "--rows",
+            "1",
+            "--cols",
+            "3",
+            "--zoom",
+            "1",
+            "--line-numbers",
+            "abc",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    # The announcement reports the magnified output
+    # dimensions (rows * zoom × cols * zoom) — same as
+    # without --line-numbers. The gutter is in
+    # *addition* to that.
+    assert "1×3 window" in out.out
+    assert "zoom 1" in out.out
+    # And the gutter is visible on the rendered line.
+    assert "   1 │ abc" in out.out
+
+
+def test_main_line_numbers_off_by_default(capsys) -> None:
+    """Without ``--line-numbers``, the rendered output
+    has no gutter — the default behaviour is unchanged.
+    This is the regression guard against an accidental
+    flip-the-default mistake."""
+    rc = zoom.main(
+        ["--rows", "1", "--cols", "3", "--zoom", "1", "abc"]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    # The rendered line is the literal source — no
+    # "   1 │ " prefix.
+    assert "abc" in out.out
+    assert "│" not in out.out
+
+
+def test_main_line_numbers_quiet_still_announces(capsys) -> None:
+    """``--quiet`` suppresses the *announcement* line,
+    not the gutter. The gutter is part of the
+    rendered output, not the announcement — so
+    ``--quiet --line-numbers`` still emits the
+    guttered viewport. (Quiet + line-numbers is the
+    canonical "clean pipe" invocation: render the
+    guttered block to stdout, nothing else.)
+    """
+    rc = zoom.main(
+        [
+            "--quiet",
+            "--rows",
+            "1",
+            "--cols",
+            "3",
+            "--zoom",
+            "1",
+            "--line-numbers",
+            "abc",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    # No announcement.
+    assert "window" not in out.out
+    # The gutter is on stdout.
+    assert "   1 │ abc" in out.out
+
+
+def test_main_line_numbers_follow_shifts_per_frame(
+    tmp_path, capsys
+) -> None:
+    """``--follow --line-numbers`` re-derives the
+    first source row on every frame, so the gutter
+    numbers track the tail of the source as it
+    grows. We write a file, run the magnifier with
+    ``--follow`` + ``--line-numbers`` and a fake
+    clock / no-sleep, then verify the gutter on
+    the captured frame reflects the *file*'s line
+    count, not the viewport's top edge. The
+    end-to-end guarantee is: a tail-tracking
+    magnifier always shows the source's actual
+    line numbers.
+    """
+    # Two lines, then the magnifier renders the
+    # last ``--rows`` lines. With rows=1 + follow,
+    # the viewport shows just line 2; the gutter
+    # should say "2".
+    src = tmp_path / "log.txt"
+    src.write_text("line1\nline2\n", encoding="utf-8")
+    rc = zoom.main(
+        [
+            "--quiet",
+            "--line-numbers",
+            "--follow",
+            "--max-frames",
+            "1",
+            "--file",
+            str(src),
+            "--rows",
+            "1",
+            "--cols",
+            "5",
+            "--zoom",
+            "1",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    # With follow, the viewport tracks the tail
+    # (just "line2"), and the gutter number
+    # reflects the source row that line is on
+    # (line 2). "line1" was offset out of view.
+    assert "   2 │ line2" in out.out
+    assert "line1" not in out.out
+
+
+def test_help_text_mentions_line_numbers() -> None:
+    """``--line-numbers`` is in the ``--help`` output
+    so a user who hits ``paw-zoom --help`` can
+    find it. Regression guard against an
+    accidental rename of the flag."""
+    help_text = zoom.build_parser().format_help()
+    assert "--line-numbers" in help_text

@@ -2190,3 +2190,113 @@ concrete sibling for the discovery family: `--sha`.
   symmetric `to_json()` / describe helper refactor mentioned
   in the previous tick is still on the back burner until
   someone asks for it.
+
+## 2026-09-20 — `paw-zoom --line-numbers` ships: per-source-row gutter annotation
+
+**What changed.** A new `--line-numbers` flag on `paw-zoom`
+prefixes each magnified source row with its 1-based row number
+in a 4-char right-aligned column + ` | ` gutter (same shape as
+`cat -n` / `nl` / most editors). The gutter is added on top of
+the rendered viewport, so the magnified width is unchanged. The
+first number is `cfg.row_offset + 1`, so
+`paw-zoom --offset 12 --line-numbers …` produces gutters
+starting at `13`; the gutter tracks the source's actual line
+numbers as `--follow` / `--live` re-derive the offset per frame.
+
+**Why.** The previous tick's discovery surface answered every
+question a script could ask *about* the source (how big / what
+in it / did it change / what backend would I get / what
+backends are available). What's still missing is the
+*correlate* axis: when a user looks at a magnified viewport,
+they want to know "which source line is this block from?" —
+especially for a tail-tracking log magnifier, where the rows
+in the viewport are constantly being replaced. `--line-numbers`
+is the answer: a `cat -n` / `nl` gutter that the user can
+cross-reference with the source file in a separate terminal or
+editor pane.
+
+**How.**
+
+- **Public helper.** New
+  `_format_line_numbers(rendered, *, zoom, first_source_row,
+  width=4, gutter=" │ ")` in `whisperpaw/zoom.py`. Pure:
+  groups the rendered viewport into `zoom`-sized chunks (one
+  chunk per source row), prepends
+  `f"{row:>{width}}{gutter}"` to every line in the group, and
+  is `width` / `gutter` overridable for tighter or looser
+  gutters. Empty `rendered` is a no-op (the `--raw` and the
+  no-frame case both rely on this); a non-positive `zoom`
+  falls back to per-line numbering as a defensive boundary
+  check (parse_args already rejects `--zoom 0` at the CLI
+  level, but the library function is callable from anywhere,
+  so the re-validation belongs at the boundary). A negative
+  `first_source_row` is the caller's responsibility — the
+  production wiring uses `max(1, cfg.row_offset + 1)` so a
+  stray negative `--offset` never reaches the helper.
+
+- **CLI.** New `args.line_numbers: bool` (default `False`,
+  `store_true`). The flag is a *render-time* annotation: it
+  composes with every render-driving flag
+  (`--zoom` / `--rows` / `--cols` / `--offset` /
+  `--col-offset` / `--charset` / `--live` / `--follow` /
+  `--max-frames` / `--max-seconds` / `--snapshot`) and is
+  silently ignored by the discovery flags (`--list-backends`,
+  `--info`, `--size`, `--stats`, `--sha`) and `--raw`, which
+  never produce magnified output to annotate. The gutter is
+  applied in `main()` after the one-shot `render_viewport()`
+  call, in `_tail_and_render` after each per-frame render
+  (so `--follow` + `--live` get the right per-frame
+  `first_source_row`), and in `_tail_screen_and_render` after
+  each per-frame screen-capture render. The `--quiet` flag
+  suppresses the *announcement* line, not the gutter — the
+  canonical "clean pipe" invocation is
+  `paw-zoom --quiet --line-numbers …`.
+
+- **Tests.** 17 new tests in `tests/test_zoom.py`:
+  - 8 `_format_line_numbers` low-level tests (basic
+    / empty / zoom-1 / offset-shift / custom-width /
+    defensive-zoom / negative-first-row / `gutter=" │ "`
+    default).
+  - 2 `parse_args` tests (default-off / flagged).
+  - 6 `main()` end-to-end tests (render-with-gutter /
+    offset-shifts-numbering / zoom-2-repeats-number /
+    announcement-still-fires / off-by-default /
+    quiet-still-emits-gutter).
+  - 1 `--follow` integration test proving the gutter tracks
+    the tail of a live file (two-line source + `--follow
+    --rows 1 --max-frames 1` → gutter says `2` for the
+    visible line, not `1`).
+  - 1 help-text regression guard (`--line-numbers` appears in
+    `format_help()`).
+
+- **Bookkeeping.** Regenerated all four static shell-
+  completion files (`completions/whisperpaw.{bash,zsh,fish,nu}`)
+  so `--line-numbers` shows up in Tab completion for every
+  shell. The byte-identity test in
+  `tests/test_completions.py` caught the drift and forced
+  the regen, as it has for every prior tick.
+
+- **Total: 690/690 green** (17 new + 673 existing). Pure
+  stdlib, no new pip deps, no telemetry, no network. The
+  new helper lives next to `render_viewport` in
+  `whisperpaw/zoom.py` so the render-time public surface
+  stays co-located.
+
+**Next tick.** With `--line-numbers` shipped, the
+*correlate* axis is covered (the user can now ask "which
+source line is this magnified row from?"), and the render
+surface has the standard four annotation affordances any
+magnifier is expected to ship: shape control
+(`--zoom` / `--rows` / `--cols` / `--offset` /
+`--col-offset` / `--charset`), live control
+(`--live` / `--follow` / `--max-frames` / `--max-seconds`),
+output (`--snapshot` / `--raw` / `--quiet`), and now
+correlation (`--line-numbers`). The discovery surface
+(`--list-backends` / `--info` / `--size` / `--stats` /
+`--sha`) is also complete; the next genuinely useful
+behaviour change is either a fourth sound pack for
+`paw-sound` (still needs a user request), a small slice of
+the screen-magnifier overlay UX (the
+"wait-for-keypress-then-exit" one-tick piece), or the
+shared `to_json()` / describe helper refactor (a refactor
+across modules, deferred unless someone asks).

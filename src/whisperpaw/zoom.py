@@ -227,6 +227,84 @@ _CHARSET_FILLS: dict[str, str] = {
 }
 
 
+def _format_line_numbers(
+    rendered: str,
+    *,
+    zoom: int,
+    first_source_row: int,
+    width: int = 4,
+    gutter: str = " │ ",
+) -> str:
+    """Prepend a per-source-row number to each magnified line in ``rendered``.
+
+    The output of :func:`render_viewport` has exactly ``rows * zoom`` lines,
+    where each source row is represented by exactly ``zoom`` consecutive
+    magnified lines (the same source row N is repeated ``zoom`` times).
+    ``_format_line_numbers`` splits ``rendered`` into those ``zoom``-sized
+    groups and prepends ``f"{row+first_source_row:>{width}}{gutter}"`` to
+    every line in the group, so the magnified output now reads:
+
+          1 │ xxxxxxxxxx
+          1 │ xxxxxxxxxx
+          2 │ yyyyyyyyyy
+          2 │ yyyyyyyyyy
+
+    instead of:
+
+        xxxxxxxxxx
+        xxxxxxxxxx
+        yyyyyyyyyy
+        yyyyyyyyyy
+
+    The default ``width=4`` right-aligns the row number in a 4-char
+    column (so a 1-source-row viewport and a 9999-source-row viewport
+    line up cleanly under each other). ``gutter=" │ "`` is the
+    standard ``cat -n`` / ``nl`` / editor gutter (a vertical bar
+    flanked by spaces, easy to read on a busy terminal). Both are
+    overridable for tests and for the rare user who wants a tighter
+    or looser gutter. The numbers are 1-based (matching what
+    `cat -n` / `nl` / editors show),
+    and ``first_source_row`` is what the user would have seen in their
+    editor at the start of the magnified viewport. For a vanilla
+    ``paw-zoom hello`` (no offset), that's ``1``; for
+    ``paw-zoom --offset 12 hello`` it's ``13``.
+
+    The split is line-by-line so the function is pure and trivially
+    testable: an empty ``rendered`` returns an empty string (the
+    ``--raw`` and the no-frame case both rely on this). A
+    ``zoom <= 0`` or a non-multiple-of-zoom line count is treated
+    defensively: the function still emits a prefix per line, just
+    with whatever numbering ``itertools.count`` produces — the
+    caller is responsible for passing a valid ``zoom`` (we already
+    validate that at parse time).
+    """
+    if not rendered:
+        return rendered
+    if zoom < 1:
+        # Defensive: a non-positive zoom can't be grouped, so we
+        # fall back to numbering every line sequentially. This
+        # should never happen in practice (parse_args rejects
+        # ``--zoom 0``), but the library function is callable
+        # from anywhere, so we re-validate at the boundary.
+        return "\n".join(
+            f"{row:>{width}}{gutter}{line}"
+            for row, line in enumerate(rendered.split("\n"), start=first_source_row)
+        )
+    lines = rendered.split("\n")
+    out: list[str] = []
+    # Group the magnified output into ``zoom``-sized chunks, one
+    # chunk per source row. ``itertools.count`` gives us a clean
+    # 1-based-per-source-row numbering (start=first_source_row)
+    # so the user sees the same numbers `cat -n` would show.
+    from itertools import count
+    counter = count(first_source_row)
+    for start in range(0, len(lines), zoom):
+        row = next(counter)
+        prefix = f"{row:>{width}}{gutter}"
+        out.extend(prefix + line for line in lines[start : start + zoom])
+    return "\n".join(out)
+
+
 def render_viewport(source: str, cfg: ZoomConfig) -> str:
     """Render the magnified viewport for ``source`` under ``cfg``.
 
@@ -616,6 +694,7 @@ def _tail_and_render(
     clock=None,
     time_fn=None,
     sink=None,
+    line_numbers: bool = False,
 ) -> int:
     """Follow ``path`` and re-render the magnified viewport on each change.
 
@@ -742,6 +821,18 @@ def _tail_and_render(
                 cfg, row_offset=_tail_offset(text, cfg.rows)
             )
         rendered = render_viewport(text, frame_cfg)
+        if line_numbers:
+            # --line-numbers: per-frame, the first source row in
+            # view is ``frame_cfg.row_offset + 1`` (1-based, same
+            # as the one-shot path). ``frame_cfg`` already
+            # accounts for ``--follow``'s per-frame
+            # ``row_offset`` rewrite, so a tail-tracking live
+            # view shows the right numbers as the source grows.
+            rendered = _format_line_numbers(
+                rendered,
+                zoom=frame_cfg.zoom,
+                first_source_row=max(1, frame_cfg.row_offset + 1),
+            )
         if sink is not None:
             sink(rendered)
         else:
@@ -769,6 +860,7 @@ def _tail_screen_and_render(
     sink=None,
     capture_fn=None,
     has_changed=None,
+    line_numbers: bool = False,
 ) -> int:
     """Follow a screen-capture adapter and re-render the magnified
     viewport on every change.
@@ -920,6 +1012,19 @@ def _tail_screen_and_render(
                 cfg, row_offset=_tail_offset(text, cfg.rows)
             )
         rendered = render_viewport(text, frame_cfg)
+        if line_numbers:
+            # --line-numbers: per-frame, the first source row in
+            # view is ``frame_cfg.row_offset + 1`` (1-based, same
+            # as the text-source tail and the one-shot path).
+            # ``frame_cfg`` already accounts for ``--follow``'s
+            # per-frame rewrite, so a tail-tracking live screen
+            # view shows the right numbers as the captured
+            # region grows.
+            rendered = _format_line_numbers(
+                rendered,
+                zoom=frame_cfg.zoom,
+                first_source_row=max(1, frame_cfg.row_offset + 1),
+            )
         if sink is not None:
             sink(rendered)
         else:
@@ -1011,6 +1116,29 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Fill character for empty cells: 'space' (default, invisible), "
             "'hash' (#), or 'dot' (.)."
+        ),
+    )
+    parser.add_argument(
+        "--line-numbers",
+        action="store_true",
+        dest="line_numbers",
+        help=(
+            "Prefix each magnified source row with its 1-based row "
+            "number (right-aligned in a 4-char column, then a ' | ' "
+            "gutter — same shape as 'cat -n' / 'nl' / most editors). "
+            "The first number is the 1-based index of the first "
+            "source row in view, so a 'paw-zoom --offset 12 ...' "
+            "viewport starts at '13'. Useful for correlating the "
+            "magnified block with the source: 'which source line "
+            "did this magnified row come from?'. Composes with every "
+            "render-driving flag (--zoom / --rows / --cols / "
+            "--offset / --col-offset / --charset / --live / "
+            "--follow / --max-frames / --max-seconds / --snapshot) "
+            "and is ignored by the discovery flags (--list-backends, "
+            "--info, --size, --stats, --sha) and --raw, which never "
+            "produce magnified output to annotate. The gutter does "
+            "not count against --cols: the magnified viewport's "
+            "horizontal extent is unchanged."
         ),
     )
     parser.add_argument(
@@ -1776,16 +1904,18 @@ def main(argv: list[str] | None = None) -> int:
                     max_frames=args.max_frames,
                     max_seconds=args.max_seconds,
                     sink=_sink,
+                    line_numbers=args.line_numbers,
                 )
-            return _tail_and_render(
-                args.file,
-                cfg,
-                interval=args.interval,
-                follow=args.follow,
-                max_frames=args.max_frames,
-                max_seconds=args.max_seconds,
-                sink=_sink,
-            )
+                return _tail_and_render(
+                    args.file,
+                    cfg,
+                    interval=args.interval,
+                    follow=args.follow,
+                    max_frames=args.max_frames,
+                    max_seconds=args.max_seconds,
+                    sink=_sink,
+                    line_numbers=args.line_numbers,
+                )
         except KeyboardInterrupt:
             # Ctrl-C is a clean exit in --live mode. Don't print
             # a traceback.
@@ -1799,6 +1929,18 @@ def main(argv: list[str] | None = None) -> int:
         # we re-validate at the boundary.
         print(f"paw-zoom: {exc}", file=sys.stderr)
         return 2
+    if args.line_numbers:
+        # --line-numbers: prepend the 1-based source-row index to
+        # each magnified line, so the user can correlate the
+        # rendered block with the source. The first source row
+        # in view is ``cfg.row_offset + 1`` (1-based, matching
+        # what `cat -n` would print); the gutter is added on
+        # top of the rendered viewport so the magnified width
+        # is unchanged.
+        first_row = max(1, cfg.row_offset + 1)
+        rendered = _format_line_numbers(
+            rendered, zoom=cfg.zoom, first_source_row=first_row
+        )
     if args.snapshot is not None:
         try:
             # Create or overwrite. Text mode preserves the codepoint
