@@ -1080,6 +1080,232 @@ def test_main_max_frames_without_live_still_renders_once(
     assert rc == 0
     out = capsys.readouterr().out
     assert "only one" in out
+
+
+# ---------------------------------------------------------------------------
+# --max-seconds (cap the wall-clock duration of --live)
+# ---------------------------------------------------------------------------
+
+
+def test_max_seconds_helper_zero_means_unlimited() -> None:
+    """``_max_seconds_exceeded`` with ``max_seconds <= 0`` always
+    returns ``False`` — the loop helper short-circuits when the cap
+    is disabled, so a runaway ``time_fn`` can't accidentally fire
+    a no-op cap."""
+    assert zoom._max_seconds_exceeded(0.0, 0.0, 999.0) is False
+    assert zoom._max_seconds_exceeded(0.0, -1.0, 999.0) is False
+    assert zoom._max_seconds_exceeded(100.0, 0.0, 200.0) is False
+
+
+def test_max_seconds_helper_within_window() -> None:
+    """The helper returns ``False`` while ``now - start < max_seconds``,
+    even when the loop has already run for a while."""
+    assert zoom._max_seconds_exceeded(0.0, 10.0, 0.0) is False
+    assert zoom._max_seconds_exceeded(0.0, 10.0, 5.0) is False
+    assert zoom._max_seconds_exceeded(0.0, 10.0, 9.999) is False
+
+
+def test_max_seconds_helper_at_boundary() -> None:
+    """The check is ``>=``, so a cap of exactly ``max_seconds`` is
+    treated as already exceeded. This makes "run for 5s" mean
+    *at most* 5s — one more iteration would always push past the
+    wall-clock window the user asked for."""
+    assert zoom._max_seconds_exceeded(0.0, 10.0, 10.0) is True
+    assert zoom._max_seconds_exceeded(0.0, 10.0, 10.001) is True
+    assert zoom._max_seconds_exceeded(0.0, 10.0, 1000.0) is True
+
+
+def test_max_seconds_helper_nonzero_start() -> None:
+    """The helper only looks at the elapsed time
+    (``now - start``), not at ``start`` itself. We pin this with a
+    non-zero start so a refactor that re-reads ``start`` (instead
+    of treating it as a pure input) gets caught."""
+    # start=50, now=55 -> elapsed=5 < 10 -> False
+    assert zoom._max_seconds_exceeded(50.0, 10.0, 55.0) is False
+    # start=50, now=60 -> elapsed=10 == 10 -> True
+    assert zoom._max_seconds_exceeded(50.0, 10.0, 60.0) is True
+
+
+def test_tail_and_render_max_seconds_caps_loop(tmp_path) -> None:
+    """With ``max_seconds > 0``, the loop exits once the wall-clock
+    window has passed. We drive the loop with a fake ``time_fn``
+    that advances on every poll so the cap fires on a known
+    iteration (no real sleep, no flake)."""
+    src = tmp_path / "log.txt"
+    src.write_text("v1\n", encoding="utf-8")
+    cfg = zoom.ZoomConfig(rows=2, cols=5, zoom=1)
+    frames: list[str] = []
+    # Fake clock: every call returns 1.0s after the previous one.
+    # After 3 polls, the cap of 3.0s fires on the 4th.
+    tick = {"t": 0.0}
+
+    def fake_time() -> float:
+        return tick["t"]
+
+    def stop() -> bool:
+        tick["t"] += 1.0
+        return tick["t"] >= 20  # safety net so a buggy cap doesn't hang
+
+    rc = zoom._tail_and_render(
+        str(src),
+        cfg,
+        interval=0.0,
+        max_seconds=3.0,
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        time_fn=fake_time,
+        sink=frames.append,
+    )
+    assert rc == 0
+    # The cap fires at the top of the 4th iteration, so the loop
+    # runs at most 3 iterations -> at most 3 frames (one per
+    # iteration; the change detector fires on every poll because
+    # we don't mutate the file but the start time is "before the
+    # very first iteration", so the first frame is the initial
+    # state, and the static source emits no further frames).
+    # The exact frame count depends on the change detector; the
+    # load-bearing assertion is that the loop exited (rc=0) and
+    # the cap fired well before the stop predicate.
+    assert tick["t"] < 20  # cap fired before the safety net
+
+
+def test_tail_and_render_max_seconds_zero_means_unlimited(tmp_path) -> None:
+    """``max_seconds=0`` (the default) is "no cap" — the loop runs
+    until the stop predicate fires, regardless of the wall-clock
+    time elapsed. We pin this with a controlled fake clock that
+    returns 1e9 seconds (a clearly preposterous value) so a
+    refactor that mis-reads the default can't accidentally fire
+    the cap."""
+    src = tmp_path / "log.txt"
+    src.write_text("static\n", encoding="utf-8")
+    cfg = zoom.ZoomConfig(rows=2, cols=5, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        return ticks["n"] >= 3
+
+    rc = zoom._tail_and_render(
+        str(src),
+        cfg,
+        interval=0.0,
+        max_seconds=0.0,  # explicit default — no cap
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        time_fn=lambda: 1e9,  # preposterous wall-clock — cap must not fire
+        sink=frames.append,
+    )
+    assert rc == 0
+    # The cap never fired, so the loop ran until the stop predicate.
+    assert ticks["n"] == 3
+
+
+def test_tail_and_render_max_seconds_composes_with_max_frames(
+    tmp_path,
+) -> None:
+    """``max_seconds`` and ``max_frames`` compose: whichever cap
+    fires first wins. We pin this with a fake clock that advances
+    slowly (so the time cap doesn't fire) and an aggressive
+    ``max_frames=2`` so the iteration cap fires instead — the
+    loop exits after 2 iterations even though the wall-clock
+    window is 1000s."""
+    src = tmp_path / "log.txt"
+    src.write_text("v1\n", encoding="utf-8")
+    cfg = zoom.ZoomConfig(rows=2, cols=5, zoom=1)
+    frames: list[str] = []
+    ticks = {"n": 0}
+
+    def stop() -> bool:
+        ticks["n"] += 1
+        return ticks["n"] >= 20  # safety net
+
+    rc = zoom._tail_and_render(
+        str(src),
+        cfg,
+        interval=0.0,
+        max_frames=2,
+        max_seconds=1000.0,  # 1000s — never fires
+        stop_predicate=stop,
+        clock=lambda _x: None,
+        time_fn=lambda: 0.0,  # frozen clock — time cap never fires
+        sink=frames.append,
+    )
+    assert rc == 0
+    # The iteration cap fired after 2 iterations.
+    assert ticks["n"] <= 3
+
+
+def test_parse_args_max_seconds_default_zero() -> None:
+    """Without ``--max-seconds``, the attribute is 0.0 (no cap).
+    The float default matters because the loop helper treats
+    ``<= 0`` as "disabled"."""
+    args = zoom.parse_args(["hello"])
+    assert args.max_seconds == 0.0
+    assert isinstance(args.max_seconds, float)
+
+
+def test_parse_args_max_seconds_flag() -> None:
+    """``--max-seconds SECS`` parses to a float attribute."""
+    args = zoom.parse_args(["--max-seconds", "5.5", "hello"])
+    assert args.max_seconds == 5.5
+
+
+def test_parse_args_max_seconds_negative_is_usage_error() -> None:
+    """A negative ``--max-seconds`` is a usage error (exit 2) — only
+    0+ makes sense (0 = unlimited). The error message names the
+    flag so the user can find the typo in a long pipeline."""
+    with pytest.raises(SystemExit) as exc_info:
+        zoom.parse_args(["--max-seconds", "-1", "hello"])
+    assert exc_info.value.code == 2
+
+
+def test_max_seconds_help_text_mentions_flag() -> None:
+    """The --help text must mention ``--max-seconds`` so the tool is
+    discoverable and accidental renames are caught."""
+    parser = zoom.build_parser()
+    help_text = parser.format_help()
+    assert "--max-seconds" in help_text
+
+
+def test_main_max_seconds_live_exits_cleanly(tmp_path, capsys) -> None:
+    """End-to-end: ``paw-zoom --live --max-seconds 0.1 --file PATH``
+    exits cleanly with rc=0. A 0.1s cap is large enough to let the
+    loop run a few iterations, small enough that the test doesn't
+    sleep. The point is to pin the plumbing through ``main()``:
+    the new flag doesn't break the live path."""
+    src = tmp_path / "log.txt"
+    src.write_text("L1\n", encoding="utf-8")
+    rc = zoom.main(
+        ["--live", "--file", str(src), "--rows", "2", "--cols", "5",
+         "--zoom", "1", "--max-seconds", "0.1", "--interval", "0.01",
+         "--quiet"]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The first frame was emitted; the static file produces no
+    # further frames (the change-detector suppresses them), so the
+    # loop exits on its own well before the cap. The point is that
+    # the cap didn't break the path.
+    assert "L1" in out
+
+
+def test_main_max_seconds_without_live_still_renders_once(
+    tmp_path, capsys
+) -> None:
+    """``--max-seconds`` without ``--live`` is a no-op: the one-shot
+    render path emits exactly one frame regardless of the value,
+    just like ``--max-frames``. (The CLI documents this; the test
+    pins it.)"""
+    src = tmp_path / "log.txt"
+    src.write_text("only one\n", encoding="utf-8")
+    rc = zoom.main(
+        ["--file", str(src), "--rows", "1", "--cols", "8",
+         "--zoom", "1", "--max-seconds", "100", "--quiet"]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "only one" in out
     # A one-shot render emits exactly one block (rows * zoom lines,
     # which is 1 line at zoom=1).
     assert out.count("only one") == 1

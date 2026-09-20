@@ -2110,3 +2110,83 @@ concrete sibling for the discovery family: `--sha`.
   asks), or the screen-magnifier overlay UX (hotkeys,
   exit-on-key, transparent render — still a 2-3 tick
   project).
+
+---
+
+## 2026-09-20 — `--max-seconds` (wall-clock cap on `--live`)
+
+- **What.** New `paw-zoom --max-seconds SECS` flag. The natural
+  companion of `--max-frames`: `--max-frames` caps the live
+  loop at N iterations, `--max-seconds` caps it at N wall-clock
+  seconds. Useful for scripts that want "watch the live log
+  for 30s, then exit" without having to estimate the iteration
+  count in advance.
+
+- **Why.** Until now, `paw-zoom --live` had exactly one bounded
+  mode: `--max-frames N`. That works for a known number of
+  changes, but the more common scripting question is "how
+  long should I wait?" — and the answer to *that* question is
+  always a wall-clock duration, not a poll count. The new flag
+  is the answer. Composes with `--max-frames` (whichever cap
+  fires first wins) so users who care about both can express
+  both.
+
+- **How.** New public helper
+  `whisperpaw.zoom._max_seconds_exceeded(start, max_seconds, now)`:
+  pure, `(now - start) >= max_seconds`, short-circuits to
+  `False` when `max_seconds <= 0` (the "no cap" sentinel).
+  Both `_tail_and_render` and `_tail_screen_and_render` gained
+  a `max_seconds: float = 0.0` keyword plus a `time_fn=None`
+  injection point (default `time.monotonic`, immune to NTP
+  slews). The check fires at the top of every iteration, so a
+  slow source that spends most of its time in the change
+  detector or the renderer still respects the cap. Parse-time
+  validation: negative → exit 2 with a clear stderr message
+  naming the flag; zero (the default) is the unlimited
+  sentinel. Has no effect without `--live` — the one-shot
+  render always emits exactly one frame, same convention as
+  `--max-frames`.
+
+- **Tests.** 13 new tests in `tests/test_zoom.py` (660 → 673
+  green):
+  - 4 `_max_seconds_exceeded` low-level tests covering
+    zero-means-unlimited / within-window / at-boundary /
+    non-zero-start.
+  - 3 `_tail_and_render` integration tests covering the cap
+    actually firing (fake clock advances 1s per poll, cap at
+    3s → exits before safety-net at 20s) / zero-is-unlimited
+    (clock returns 1e9s — cap must not fire) / composes-with-
+    max-frames (frozen clock, aggressive `max_frames=2` →
+    iteration cap wins).
+  - 3 `parse_args` tests covering default-zero (float, not
+    int) / flagged / negative-is-exit-2.
+  - 1 help-text test (asserts `--max-seconds` is in
+    `format_help()`).
+  - 2 `main()` end-to-end tests covering live-with-cap (real
+    `time.sleep`, exits rc=0) / without-live-is-noop
+    (one-shot render still emits exactly one frame).
+
+- **Bookkeeping.** Regenerated all four static shell-
+  completion files (`completions/whisperpaw.{bash,zsh,
+  fish,nu}`) so `--max-seconds` shows up in Tab completion for
+  every shell. The byte-identity test in
+  `tests/test_completions.py` caught the drift and forced the
+  regen, as it has for every prior tick. The `--max-frames`
+  help text was also updated to mention `--max-seconds` in
+  the "composes with" list, so the relationship between the
+  two caps is visible from `--help` without reading the
+  source.
+
+- **Next tick.** With `--max-seconds` shipped, the live loop
+  has two caps (iteration / wall-clock) and three short-
+  circuits (`--max-frames` / `--max-seconds` / Ctrl-C). The
+  remaining natural follow-ups are still the screen-magnifier
+  overlay UX (hotkeys, exit-on-key, transparent render — a
+  2-3 tick project) and a new sound pack for `paw-sound`
+  (still needs a user request). The discovery surface
+  (`--list-backends` / `--info` / `--size` / `--stats` /
+  `--sha`) is complete; the live surface now has
+  `--max-frames` + `--max-seconds` as a pair. The
+  symmetric `to_json()` / describe helper refactor mentioned
+  in the previous tick is still on the back burner until
+  someone asks for it.

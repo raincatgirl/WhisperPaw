@@ -71,6 +71,7 @@ _paw_zoom() {
     '--interval[Poll interval in seconds for --live (default: 0.25, must be > 0).]' \
     '--follow[Track the tail of --file PATH (like ''tail -f'') instead of showing the start.]' \
     '--max-frames[Cap --live at N loop iterations (default: 0 = unlimited, the current behaviour).]' \
+    '--max-seconds[Cap --live at SECS wall-clock seconds (default: 0 = unlimited, the current beha…]' \
     '--raw[Dump the source (text or screen) to stdout as plain text, with no magnification…]' \
     '--size[Print the source dimensions (rows x cols, in code points) and exit 0 without re…]' \
     '--stats[Print per-source statistics (chars, lines, non-blank lines, max line width, mea…]' \

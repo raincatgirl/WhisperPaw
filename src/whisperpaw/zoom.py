@@ -260,6 +260,42 @@ def render_viewport(source: str, cfg: ZoomConfig) -> str:
 DEFAULT_LIVE_INTERVAL: float = 0.25
 
 
+def _max_seconds_exceeded(
+    start: float, max_seconds: float, now: float
+) -> bool:
+    """Return True if ``max_seconds`` of wall-clock time have passed
+    since ``start``.
+
+    A pure predicate that the live loops call once per iteration
+    to decide whether the ``--max-seconds`` cap has fired. The
+    ``start`` and ``now`` values come from a ``time_fn`` injected
+    into the loop (default :func:`time.monotonic`); the helper
+    itself is pure so the math is testable without monkey-patching
+    the module-level default.
+
+    Conventions:
+
+    * ``max_seconds <= 0`` means "no cap" → always returns ``False``.
+      The CLI surfaces the same default (``--max-seconds 0``) and
+      the parse-time validator rejects negative values, so the
+      loop never sees a negative cap.
+    * The check is ``>=``, not ``>``, so a cap of exactly
+      ``max_seconds`` is treated as already exceeded (one extra
+      iteration would always push the loop past the wall-clock
+      window the user asked for, which is the more useful
+      behaviour for scripting: "run for 5s" means *at most* 5s).
+
+    The arithmetic is plain subtraction — no tolerance, no drift
+    correction, no special handling of clock jumps. ``time.monotonic``
+    is the recommended clock and is unaffected by NTP slews, so
+    the value of ``now - start`` is the wall-clock time the loop
+    actually spent.
+    """
+    if max_seconds <= 0:
+        return False
+    return (now - start) >= max_seconds
+
+
 def _read_file_text(path: str) -> str:
     """Read ``path`` as UTF-8 text. Returns ``""`` if the file is empty.
 
@@ -575,8 +611,10 @@ def _tail_and_render(
     interval: float,
     follow: bool = False,
     max_frames: int = 0,
+    max_seconds: float = 0.0,
     stop_predicate=None,
     clock=None,
+    time_fn=None,
     sink=None,
 ) -> int:
     """Follow ``path`` and re-render the magnified viewport on each change.
@@ -614,6 +652,17 @@ def _tail_and_render(
     "render the first N polls, then exit" — a bounded, deterministic
     window onto a live log.
 
+    When ``max_seconds`` is positive, the loop also runs for at
+    most that many wall-clock seconds before exiting. The check
+    fires at the *top* of the loop using ``time_fn()`` (defaults
+    to :func:`time.monotonic`; tests pass a fake clock that
+    advances manually), so the wall-clock window is "the time the
+    loop actually spent", not "the time the loop took excluding
+    the final sleep". ``0`` (the default) means no cap. Composes
+    with ``--max-frames`` — whichever cap fires first wins. Useful
+    for "render the live log for 30s, then exit" without having
+    to estimate the iteration count in advance.
+
     Returns ``0`` on a clean exit. Errors are surfaced as a single
     stderr line and the loop continues — a transient ENOENT during
     log rotation shouldn't kill the magnifier.
@@ -623,6 +672,12 @@ def _tail_and_render(
     need. But the loop shape is identical, so this can be reused.
     """
     sleep = clock if clock is not None else time.sleep
+    # ``time_fn`` is the wall-clock source for ``--max-seconds``.
+    # Default is ``time.monotonic`` (immune to NTP slews; the right
+    # clock for measuring elapsed time). Tests inject a fake clock
+    # that returns a controlled sequence of timestamps so the cap
+    # is exercised deterministically without sleeping.
+    actual_time = time_fn if time_fn is not None else time.monotonic
     last_text: str | None = None
     last_mtime: float | None = None
     # When ``max_frames`` is set, the loop runs at most that many
@@ -634,8 +689,18 @@ def _tail_and_render(
     # would loop forever waiting for a change that never arrives.
     max_iters = max_frames if max_frames > 0 else None
     iter_count = 0
+    # ``--max-seconds``: sample the wall clock once before the
+    # loop starts. Each iteration re-samples (via ``actual_time()``)
+    # at the top of the loop, so a slow source that spends most of
+    # its time in the change detector or the renderer still
+    # respects the cap. ``max_seconds <= 0`` means "no cap" and the
+    # helper short-circuits to ``False``, so the per-iteration
+    # call is essentially free.
+    loop_start = actual_time() if max_seconds > 0 else 0.0
     while stop_predicate is None or not stop_predicate():
         if max_iters is not None and iter_count >= max_iters:
+            break
+        if _max_seconds_exceeded(loop_start, max_seconds, actual_time()):
             break
         iter_count += 1
         try:
@@ -697,8 +762,10 @@ def _tail_screen_and_render(
     interval: float,
     follow: bool = False,
     max_frames: int = 0,
+    max_seconds: float = 0.0,
     stop_predicate=None,
     clock=None,
+    time_fn=None,
     sink=None,
     capture_fn=None,
     has_changed=None,
@@ -745,10 +812,16 @@ def _tail_screen_and_render(
     frozen config is left untouched; the per-frame offset is a
     derived value that lives only inside this function.
 
-    When ``max_frames`` is positive, the loop runs at most that
-    many *iterations* (not emitted frames) before exiting — same
+    When ``max_frames`` is positive, the loop runs at most that many
+    *iterations* (not emitted frames) before exiting — same
     semantics as :func:`_tail_and_render`. ``0`` (the default)
     means no cap.
+
+    When ``max_seconds`` is positive, the loop also runs for at
+    most that many wall-clock seconds before exiting — same
+    semantics as :func:`_tail_and_render`. ``0`` (the default)
+    means no cap. Composes with ``--max-frames`` — whichever cap
+    fires first wins.
 
     Returns ``0`` on a clean exit. Capture errors
     (``RuntimeError`` / ``ValueError`` from the adapter or the
@@ -763,6 +836,11 @@ def _tail_screen_and_render(
     thing they share is the loop shape.
     """
     sleep = clock if clock is not None else time.sleep
+    # ``time_fn`` is the wall-clock source for ``--max-seconds``.
+    # Same default (``time.monotonic``) and same injection pattern
+    # as ``_tail_and_render``, so the two live-tail implementations
+    # are symmetric: tests can drive either with a fake clock.
+    actual_time = time_fn if time_fn is not None else time.monotonic
     # Default capture_fn: re-capture the screen adapter each poll.
     # Named ``_do_capture`` so we don't shadow the kwarg name.
     if capture_fn is None:
@@ -789,8 +867,15 @@ def _tail_screen_and_render(
     last_text: str | None = None
     max_iters = max_frames if max_frames > 0 else None
     iter_count = 0
+    # ``--max-seconds`` cap. Sample the wall clock once before the
+    # loop starts, re-sample at the top of every iteration. Same
+    # shape as ``_tail_and_render``'s cap so a future refactor can
+    # lift the two into a shared helper if more caps land.
+    loop_start = actual_time() if max_seconds > 0 else 0.0
     while stop_predicate is None or not stop_predicate():
         if max_iters is not None and iter_count >= max_iters:
+            break
+        if _max_seconds_exceeded(loop_start, max_seconds, actual_time()):
             break
         iter_count += 1
         try:
@@ -990,10 +1075,30 @@ def build_parser() -> argparse.ArgumentParser:
             "poll regardless of whether a frame was emitted, which "
             "is what makes --live actually exit on a quiet source. "
             "Useful for scripting: 'render the first 3 changes, then "
-            "exit'. Composes with --follow, --snapshot, and the "
-            "standard --interval poll cadence. Has no effect without "
-            "--live (the one-shot render always emits exactly one "
-            "frame)."
+            "exit'. Composes with --follow, --snapshot, --max-seconds, "
+            "and the standard --interval poll cadence. Has no effect "
+            "without --live (the one-shot render always emits exactly "
+            "one frame)."
+        ),
+    )
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        default=0.0,
+        metavar="SECS",
+        help=(
+            "Cap --live at SECS wall-clock seconds (default: 0 = "
+            "unlimited, the current behaviour). The loop stops once "
+            "SECS have elapsed since --live started, regardless of "
+            "how many frames were emitted. Useful for scripting: "
+            "'watch the live log for 30s, then exit' — without "
+            "having to estimate the iteration count in advance. "
+            "Composes with --follow, --snapshot, --max-frames "
+            "(whichever cap fires first wins), and the standard "
+            "--interval poll cadence. Has no effect without --live "
+            "(the one-shot render always emits exactly one frame). "
+            "Measured with time.monotonic() so an NTP slew can't "
+            "extend the wall-clock window."
         ),
     )
     parser.add_argument(
@@ -1290,6 +1395,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.max_frames < 0:
         print(
             "paw-zoom: --max-frames must be >= 0 (0 means unlimited)",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if args.max_seconds < 0:
+        print(
+            "paw-zoom: --max-seconds must be >= 0 (0 means unlimited)",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -1663,6 +1774,7 @@ def main(argv: list[str] | None = None) -> int:
                     interval=args.interval,
                     follow=args.follow,
                     max_frames=args.max_frames,
+                    max_seconds=args.max_seconds,
                     sink=_sink,
                 )
             return _tail_and_render(
@@ -1671,6 +1783,7 @@ def main(argv: list[str] | None = None) -> int:
                 interval=args.interval,
                 follow=args.follow,
                 max_frames=args.max_frames,
+                max_seconds=args.max_seconds,
                 sink=_sink,
             )
         except KeyboardInterrupt:

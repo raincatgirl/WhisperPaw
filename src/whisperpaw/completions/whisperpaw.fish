@@ -53,6 +53,7 @@ complete -c paw-zoom -l live -d 'Follow the source like \'tail -f\': re-render t
 complete -c paw-zoom -l interval -d 'Poll interval in seconds for --live (default: 0.25, must be > 0).'
 complete -c paw-zoom -l follow -d 'Track the tail of --file PATH (like \'tail -f\') instead of showing the start.'
 complete -c paw-zoom -l max-frames -d 'Cap --live at N loop iterations (default: 0 = unlimited, the current behaviour).'
+complete -c paw-zoom -l max-seconds -d 'Cap --live at SECS wall-clock seconds (default: 0 = unlimited, the current beha…'
 complete -c paw-zoom -l raw -d 'Dump the source (text or screen) to stdout as plain text, with no magnification…'
 complete -c paw-zoom -l size -d 'Print the source dimensions (rows x cols, in code points) and exit 0 without re…'
 complete -c paw-zoom -l stats -d 'Print per-source statistics (chars, lines, non-blank lines, max line width, mea…'
