@@ -73,12 +73,13 @@ _paw_zoom() {
     '--max-frames[Cap --live at N loop iterations (default: 0 = unlimited, the current behaviour).]' \
     '--raw[Dump the source (text or screen) to stdout as plain text, with no magnification…]' \
     '--size[Print the source dimensions (rows x cols, in code points) and exit 0 without re…]' \
+    '--stats[Print per-source statistics (chars, lines, non-blank lines, max line width, mea…]' \
     '--screen[Capture a rectangular region of the visual screen and magnify it, instead of ma…]' \
     '--region[Screen rectangle to capture when --screen is set.]' \
     '--backend[Screen-capture backend to use when --screen is set (default: auto — picks the f…]' \
     '--fake-grid[With --backend fake, the text used as the ''screen'' (rows separated by ''\n'').]' \
     '--list-backends[Print the names of every supported screen-capture backend, one per line, and ex…]' \
     '--info[Print a short description of the screen-capture setup this invocation would use…]' \
-    '--json[Combine with --list-backends, --info, or --size to emit a single-line JSON obje…]'
+    '--json[Combine with --list-backends, --info, --size, or --stats to emit a single-line…]'
 }
 _paw_zoom "$@"

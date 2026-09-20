@@ -1868,3 +1868,111 @@ request), the shared `to_json()` / describe helper (a refactor
 across modules, deferred unless someone asks), or the
 screen-magnifier overlay UX (hotkeys, exit-on-key, transparent
 render — still a 2-3 tick project).
+
+## 2026-09-20 — `paw-zoom --stats` ships: per-source statistics discovery
+
+**What changed.** A new `--stats` flag on `paw-zoom` prints the
+source's `chars`, `lines`, `non_blank_lines`, `max_line_width`,
+and `mean_line_width` (code points), then exits 0 without
+rendering or capturing anything. It's the *counting* companion
+of `--size`: `--size` answers "how big is the source as a
+rectangle?" (rows × cols); `--stats` answers "what is in the
+source?" (chars / lines / non-blank lines / max line width /
+mean line width).
+
+**Why.** With `--size` shipped last tick, the source-introspection
+story was one flag away from being complete. The natural follow-up
+was a flag that doesn't just measure the source's *shape* but
+also measures its *content* — a `wc` analogue for the magnifier,
+so a script can branch on "is this a log file or a config file?"
+before piping it through the magnifier, or so a user can get a
+quick "what's actually in this 4MB log file" report without
+opening it in an editor.
+
+**How.**
+- **Public helpers in `whisperpaw.zoom`.** Three new functions:
+  `_source_stats(source) -> (chars, lines, non_blank_lines,
+  max_line_width, mean_line_width)` — `chars` and
+  `max_line_width` are measured in code points (so a CJK source
+  is counted the same way the renderer counts it); a single
+  trailing empty line is dropped if the source ends in `\n` —
+  same convention as `_source_size` and `_tail_offset`; an
+  empty source reports all zeros — the "nothing to count" answer,
+  which deliberately diverges from `_source_size`'s `(1, 0)` on
+  the same input because the two flags answer different questions.
+  `_stats_to_text(stats)` renders a 5-line fixed `key: value`
+  block (one line per field, in canonical order, with
+  `mean_line_width` formatted to 2 decimal places for stable
+  layout) so a downstream `grep` / `awk` / `column` pipeline
+  can pick any one of the five fields with a one-line selector.
+  `_stats_to_json(stats)` emits a single-line
+  `{chars, lines, max_line_width, mean_line_width,
+  non_blank_lines}` object with sorted keys + `ensure_ascii=False`;
+  `mean_line_width` is a JSON number (not a string) so `jq
+  '.mean_line_width > 1'` works without coercion. `SourceStats`
+  is exposed as a `tuple[int, int, int, int, float]` alias so
+  callers don't have to remember the positional order.
+- **CLI.** `--stats` works for all three source-resolution paths
+  (positional, `--file`, `--screen` with `--backend` / `--region`
+  / `--fake-grid`), short-circuits at the same point `--size`
+  does (after source resolution, before the render / `--raw`
+  block), and is mutually exclusive with `--size` / `--info` /
+  `--live` / `--follow` / `--max-frames` / `--snapshot` / `--raw`
+  / `--list-backends` (exit 2 with a clear stderr message). The
+  `--size`-wins-on-tie rule means the contradiction message
+  names `--size` as the offender when both `--size` and `--stats`
+  fire. `--json` composes with `--stats` → `{"chars": N,
+  "lines": M, "max_line_width": W, "mean_line_width": X.XX,
+  "non_blank_lines": K}`. The `--json requires discovery flag`
+  check was updated to accept `--stats` in addition to
+  `--list-backends` / `--info` / `--size`; the existing
+  `--json requires` test in both `tests/test_screen.py` and
+  `tests/test_zoom.py` was updated to expect the new message.
+- **Bookkeeping.** Regenerated all four static shell-completion
+  files (`completions/whisperpaw.{bash,zsh,fish,nu}`) so
+  `--stats` shows up in Tab completion for every shell. The
+  byte-identity test in `tests/test_completions.py` caught the
+  drift and forced the regen, as it has for every prior tick.
+- **Tests.** 40 new tests in `tests/test_zoom.py`:
+  - 8 `_source_stats` low-level tests (basic multi-line, single
+    line, empty string with the all-zeros divergence from
+    `_source_size`, whitespace-only with `non_blank_lines == 0`,
+    trailing-newline drop, internal-blank-line keep, mixed
+    blank/non-blank exercising the non-trivial arithmetic, CJK
+    code-point counting, mean rounded to 2 decimal places).
+  - 5 `_stats_to_text` / `_stats_to_json` tests (5-line format
+    with the 2-decimal `mean_line_width`, all-zero values,
+    `mean_line_width: 1.50` always rendered with the trailing
+    zero, JSON round-trip, key sort, `mean_line_width` as a
+    JSON number not a string).
+  - 2 `parse_args` tests (default off, flagged composes with
+    positional / `--file` / `--screen`).
+  - 25 `main()` end-to-end tests (positional text, positional
+    multi-line, JSON mode, `--file` source, `--file` missing,
+    `--screen --backend fake`, `--screen --backend fake --json`,
+    unsupported backend exit-1, no source exit-2, 7
+    mutual-exclusion rejections including a snapshot-write
+    guard, `--json` without discovery, malformed `--fake-grid`,
+    silent viewport-flag ignoring, `--help` mentions `--stats`,
+    short-circuits-before-render proven by the empty-source
+    all-zeros case the renderer would have replaced with fill,
+    consistency-with-size — `stats.lines == size.rows` and
+    `stats.max_line_width == size.cols` on a clean ASCII file).
+
+**Total: 617/617 green** (40 new + 577 existing). Pure stdlib,
+no new pip deps, no telemetry, no network. The new helpers
+live next to `_source_size` in `whisperpaw/zoom.py` so the
+source-stats public surface stays co-located with the other
+source-introspection helpers.
+
+**Next tick.** With `--stats` shipped, the source-introspection
+story is now symmetric on both axes — the user can ask
+"how big is the source?" (`--size`), "what is in the source?"
+(`--stats`), "what screen-capture setup would I get?"
+(`--info`), and "what backends are available?" (`--list-backends`),
+on any box, without going through a render. Natural follow-ups:
+a fourth sound pack (still needs a user request), the shared
+`to_json()` / describe helper (a refactor across modules,
+deferred unless someone asks), or the screen-magnifier overlay
+UX (hotkeys, exit-on-key, transparent render — still a 2-3
+tick project).

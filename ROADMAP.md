@@ -27,7 +27,7 @@ This document is the **single source of truth** for what WhisperPaw will be and 
 | `paw-read`  | ✅ shipped | Read text aloud (stdin / file / clipboard). |
 | `paw-watch` | ✅ shipped | Tail a command and speak new lines. |
 | `paw-complete` | ✅ shipped | Print shell completions (bash / zsh / fish / nushell) for every shipped tool, derived live from each tool's argparse parser. |
-| `paw-zoom`  | ✅ shipped (v0.2) | Magnify a rectangular region of text or of the **screen** (v0.2). v0.1 was an ASCII text-viewport POC; v0.2 adds a `ScreenCapture` adapter protocol, a `FakeScreen` reference implementation, and CLI flags (`--screen`, `--region X,Y,W,H`, `--backend {auto,fake,x11,win32,quartz}`, `--fake-grid`, `--list-backends`, `--info`, `--json`). The OS-specific adapters (X11 / Win32 / **Quartz**) ship as real implementations on their respective platforms; the data shape and the rest of the pipeline are real today. |
+| `paw-zoom`  | ✅ shipped (v0.2) | Magnify a rectangular region of text or of the **screen** (v0.2). v0.1 was an ASCII text-viewport POC; v0.2 adds a `ScreenCapture` adapter protocol, a `FakeScreen` reference implementation, and CLI flags (`--screen`, `--region X,Y,W,H`, `--backend {auto,fake,x11,win32,quartz}`, `--fake-grid`, `--list-backends`, `--info`, `--size`, `--stats`, `--json`). The OS-specific adapters (X11 / Win32 / **Quartz**) ship as real implementations on their respective platforms; the data shape and the rest of the pipeline are real today. |
 
 Legend: 🐣 planned · 🛠 in progress · ✅ shipped · 🐛 buggy
 
@@ -205,7 +205,8 @@ CLI: ``paw-zoom [TEXT] [--file PATH] [--rows N] [--cols N]
 [--charset space|hash|dot] [--quiet] [--snapshot PATH]
 [--live] [--interval SECS] [--follow] [--max-frames N] [--raw]
 [--screen] [--region X,Y,W,H] [--backend {auto,fake,x11,win32,quartz}]
-[--fake-grid TEXT] [--list-backends] [--info] [--json]``.
+[--fake-grid TEXT] [--list-backends] [--info] [--size]
+[--stats] [--json]``.
 
 Exit codes: 0 ok, 1 ``--file`` not found, 2 usage / no source /
 invalid args.
@@ -265,23 +266,65 @@ is resolved exactly the way it would be for a render (positional
 ``--region`` / ``--fake-grid`` for screen capture), then
 counted. ``--json`` composes with ``--size`` →
 ``{"rows": N, "cols": M}`` (single-line, sorted keys, no ASCII
-escaping). It is mutually exclusive with ``--info``, ``--live``,
-``--follow``, ``--max-frames``, ``--snapshot``, ``--raw``, and
-``--list-backends`` — all of them exist to drive a render or a
-different discovery; ``--size`` is the smallest discovery there
-is. The viewport-modifying flags (``--zoom`` / ``--rows`` /
-``--cols`` / ``--offset`` / ``--col-offset`` / ``--charset``)
-are *not* rejected, for the same reason ``--raw`` ignores them:
-the output shape of a size report does not depend on them, so a
-shell alias can keep them without breaking the report. The
-derivation lives in :func:`whisperpaw.zoom._source_size` so the
-math is testable without touching the CLI. The conventions
+escaping). It is mutually exclusive with ``--info``, ``--stats``,
+``--live``, ``--follow``, ``--max-frames``, ``--snapshot``,
+``--raw``, and ``--list-backends`` — all of them exist to drive a
+render or a different discovery; ``--size`` is the smallest
+discovery there is. The viewport-modifying flags (``--zoom`` /
+``--rows`` / ``--cols`` / ``--offset`` / ``--col-offset`` /
+``--charset``) are *not* rejected, for the same reason ``--raw``
+ignores them: the output shape of a size report does not depend
+on them, so a shell alias can keep them without breaking the
+report. The derivation lives in :func:`whisperpaw.zoom._source_size`
+so the math is testable without touching the CLI. The conventions
 match the rest of the module: lines are split on ``\n``; a single
 trailing empty line is dropped when the source ends in ``\n``
 (same as :func:`whisperpaw.zoom._extract_region` and
 :func:`whisperpaw.zoom._tail_offset`); an empty source reports
 ``(1, 0)`` — one row of zero columns, the natural shape for
 "there's a window but nothing in it".
+
+``--stats`` is the *per-source statistics* mode: print the
+source's ``chars``, ``lines``, ``non_blank_lines``,
+``max_line_width``, and ``mean_line_width`` (code points), then
+exit 0 without rendering or capturing anything. It is the
+counting companion of ``--size``: ``--size`` answers "how big
+is the source as a rectangle?" (rows × cols); ``--stats``
+answers "what is in the source?" (chars / lines / non-blank
+lines / max line width / mean line width). The source is
+resolved exactly the way it would be for a render, then
+counted. ``--json`` composes with ``--stats`` →
+``{"chars": N, "lines": M, "max_line_width": W,
+"mean_line_width": X.XX, "non_blank_lines": K}`` (single-line,
+sorted keys, no ASCII escaping, ``mean_line_width`` as a JSON
+number not a string). The default text rendering is a 5-line
+fixed ``key: value`` block (one line per field, in canonical
+order, ``mean_line_width`` formatted to 2 decimal places) so
+a downstream ``grep`` / ``awk`` / ``column`` pipeline can
+pick any one of the five fields with a one-line selector. It
+is mutually exclusive with ``--size``, ``--info``, ``--live``,
+``--follow``, ``--max-frames``, ``--snapshot``, ``--raw``, and
+``--list-backends`` for the same reason ``--size`` is — each
+one is a different kind of discovery, and we don't want to
+emit more than one of them per invocation. The
+``--size``-wins-on-tie rule means the contradiction message
+names ``--size`` as the offender when both ``--size`` and
+``--stats`` would fire. The viewport-modifying flags
+(``--zoom`` / ``--rows`` / ``--cols`` / ``--offset`` /
+``--col-offset`` / ``--charset``) are *not* rejected, for the
+same reason ``--size`` ignores them. The derivation lives in
+:func:`whisperpaw.zoom._source_stats` so the math is testable
+without touching the CLI. The conventions match the rest of
+the source-introspection helpers: lines are split on ``\n``;
+a single trailing empty line is dropped when the source ends
+in ``\n`` (same as :func:`whisperpaw.zoom._source_size` and
+:func:`whisperpaw.zoom._tail_offset`); an empty source
+reports all zeros — the "nothing to count" answer, which
+deliberately diverges from :func:`whisperpaw.zoom._source_size`'s
+``(1, 0)`` on the same input because the two flags answer
+different questions. ``chars`` and ``max_line_width`` are
+measured in code points, not bytes, so a multi-byte CJK
+source is counted the same way the renderer counts it.
 
 ### `paw-zoom` v0.2 (screen-capture adapter skeleton)
 
@@ -491,6 +534,7 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-18 — paw-zoom: add --raw flag (dump the source — text or screen — to stdout verbatim, no magnification). Mutually exclusive with --live / --follow / --max-frames / --snapshot at parse time (exit 2). The viewport-modifying flags (--zoom / --rows / --cols / --offset / --col-offset / --charset) are silently ignored in --raw mode so a shell alias can keep them. --quiet suppresses the opt-in stderr one-liner. 15 new tests in test_zoom.py (default/flagged, four mutual-exclusion rejections, positional / --file / --screen / --screen --region dumps, --quiet suppression, --raw on a headless box, --raw without a source, silent viewport-flag ignoring). 513/513 green. Static completion files regenerated.
 - 2026-09-19 — paw-zoom: add `--info` flag (screen-capture diagnostic). New public helpers in `whisperpaw._screen`: `describe_capture(backend, region, fake_grid, get_capture_fn)` returns a 5-key metadata dict (backend / available / adapter / screen_size / region); `describe_to_text(info)` renders it as 5 fixed-order `key: value` lines; `describe_to_json(info)` emits the same shape as a single-line parseable JSON object. The CLI flag --info requires --screen (a usage error otherwise) and is mutually exclusive with --live / --follow / --max-frames / --snapshot / --raw (exit 2). --info --json combines them; --json is also now valid with --list-backends. The flag short-circuits in main() before the source-resolution block so a missing OS adapter is reported as `available: no` rather than a fatal exit-1. 27 new tests in test_screen.py (describe_capture fake / unavailable / factory-ValueError / OS-backend / explicit region / "full" / out-of-range clamp / adapter screen_size failure / region-parsing error; describe_to_text format / dash placeholders; describe_to_json round-trip / None preservation; main --info requires --screen / text mode / JSON mode / unavailable / explicit region / 3 mutual-exclusion rejections / JSON-without-discovery / malformed fake-grid / help text; parse_args default + flag). 540/540 green. Static completion files regenerated.
 - 2026-09-19 — paw-zoom: add `--size` flag (text-source dimensions discovery). The text-side analog of --info: --info answers "what screen-capture setup would I get?"; --size answers "how big is the source?". New public helpers in `whisperpaw.zoom`: `SourceSize` named tuple alias, `_source_size(source) -> (rows, max_cols)` (code-point units; drops a single trailing empty line if the source ends in `\n` — same convention as `_tail_offset` and `_extract_region`; empty source returns `(1, 0)` — the natural shape for "window with nothing in it"), `_size_to_text(size)` (fixed `R x C` format), `_size_to_json(size)` (single-line `{"cols": C, "rows": R}` with sorted keys + `ensure_ascii=False`). The CLI flag works for all three source-resolution paths (positional, --file, --screen with --backend/--region/--fake-grid), short-circuits AFTER source resolution but BEFORE the render / --raw block, and is mutually exclusive with --info / --live / --follow / --max-frames / --snapshot / --raw / --list-backends (exit 2 with a clear stderr message). --json composes with --size → `{"rows": N, "cols": M}`. The mutual-exclusion check is ordered BEFORE `--live requires --file/--screen` so the contradiction message wins when both would fire. 37 new tests in test_zoom.py (8 _source_size low-level tests covering basic / single-line / empty / whitespace / trailing-newline / internal-blank-line / unicode / max-col-picks-longest; 3 _size_to_text / _size_to_json tests covering format / zero-cols / round-trip / key sort / ensure_ascii; 2 parse_args tests covering default off + flagged; 16 main() end-to-end tests covering positional text / multiline / JSON / --file / --file-missing / --screen / --screen --json / --screen --region / unsupported-backend / no-source / 6 mutual-exclusion rejections with one snapshot-write guard / JSON-without-discovery / malformed-fake-grid / viewport-flag-ignoring / help-text / short-circuits-before-render). 577/577 green. Static completion files regenerated so --size shows up in Tab completion.
+- 2026-09-20 — paw-zoom: add `--stats` flag (per-source statistics discovery). The counting companion of --size: --size answers "how big is the source as a rectangle?" (rows × cols); --stats answers "what is in the source?" (chars / lines / non-blank lines / max line width / mean line width). New public helpers in `whisperpaw.zoom`: `SourceStats` named tuple alias, `_source_stats(source) -> (chars, lines, non_blank_lines, max_line_width, mean_line_width)` (code-point units for `chars` / `max_line_width`; drops a single trailing empty line if the source ends in `\n` — same convention as `_source_size` and `_tail_offset`; empty source returns all zeros — the "nothing to count" answer, which deliberately diverges from `_source_size`'s `(1, 0)` on the same input because the two flags answer different questions), `_stats_to_text(stats)` (5-line fixed `key: value` block, `mean_line_width` rendered as a stable 2-decimal float), `_stats_to_json(stats)` (single-line `{chars, lines, max_line_width, mean_line_width, non_blank_lines}` with sorted keys + `ensure_ascii=False`; `mean_line_width` is a JSON number not a string). The CLI flag works for all three source-resolution paths (positional, --file, --screen with --backend/--region/--fake-grid), short-circuits at the same point --size does (after source resolution, before the render / --raw block), and is mutually exclusive with --size / --info / --live / --follow / --max-frames / --snapshot / --raw / --list-backends (exit 2 with a clear stderr message). --json composes with --stats → `{"chars": N, "lines": M, "max_line_width": W, "mean_line_width": X.XX, "non_blank_lines": K}`. The mutual-exclusion check is ordered AFTER --size's so --size's contradiction message wins when both --size and --stats would fire. 40 new tests in test_zoom.py (8 _source_stats low-level tests covering basic / single-line / empty / whitespace / trailing-newline / internal-blank-line / mixed / unicode / mean-rounding; 5 _stats_to_text / _stats_to_json tests covering format / zero-values / 2-decimal-mean / round-trip / key-sort / JSON-number; 2 parse_args tests covering default-off + flagged; 25 main() end-to-end tests covering positional text / multiline / JSON / --file / --file-missing / --screen fake / --screen fake --json / unsupported-backend / no-source / 7 mutual-exclusion rejections including a snapshot-write guard / JSON-without-discovery / malformed-fake-grid / viewport-flag-ignoring / help-text / short-circuits-before-render / consistency-with-size). 617/617 green. Static completion files regenerated so --stats shows up in Tab completion. The existing --json-requires-discovery tests in test_screen.py and test_zoom.py were updated to expect the new `--json requires --list-backends, --info, --size, or --stats` message.
 <!-- TICK-LOG-END -->
 
 (Updated 2026-09-17: `paw-zoom` v0.2 ships the screen-capture

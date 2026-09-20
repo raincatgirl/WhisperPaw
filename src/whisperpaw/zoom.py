@@ -358,6 +358,136 @@ def _size_to_json(size: SourceSize) -> str:
     return json.dumps({"rows": rows, "cols": cols}, sort_keys=True, ensure_ascii=False)
 
 
+#: Per-source statistics reported by ``paw-zoom --stats``. A
+#: standalone named alias so callers don't have to remember the
+#: positional order; mirrors the :data:`SourceSize` style.
+#:
+#: The five fields, in canonical order:
+#:
+#: * ``chars`` — total source code points (including newlines).
+#:   Code points, not bytes, so a multi-byte CJK source is
+#:   counted the same way the renderer would count it.
+#: * ``lines`` — logical line count, after dropping a single
+#:   trailing empty line (the ``\n``-terminator convention used
+#:   by :func:`_source_size` and :func:`_tail_offset`). An empty
+#:   source reports ``0`` lines (the "no content" answer; --size
+#:   reports ``(1, 0)`` for the same source because it answers
+#:   "what would the renderer show?", not "how much content is
+#:   there?").
+#: * ``non_blank_lines`` — lines whose stripped form is non-empty.
+#:   Empty / whitespace-only sources report ``0``.
+#: * ``max_line_width`` — longest line width in code points
+#:   (same convention as :func:`_source_size`'s ``max_cols``).
+#: * ``mean_line_width`` — mean line width in code points,
+#:   rounded to 2 decimal places. ``0.0`` for an empty source
+#:   (no lines → no mean to compute; matches the other
+#:   ``0``-as-natural-zero fields).
+SourceStats = tuple[int, int, int, int, float]
+
+
+def _source_stats(source: str) -> SourceStats:
+    """Return per-source statistics for ``source``.
+
+    The text-side analog of :func:`whisperpaw._screen.describe_capture`'s
+    *introspection* shape — ``--info`` answers "what would the
+    screen-capture pipeline do?"; ``--stats`` answers "what's in the
+    source?" Useful for the same reasons ``wc`` is: counting without
+    rendering, so a script can branch on "is this a log file or a
+    config file?" before piping it through the magnifier.
+
+    Conventions match the rest of the source-introspection helpers:
+
+    * Lines are split on ``\\n`` (same as :func:`_source_size`).
+    * A single trailing empty line is dropped when the source ends
+      in ``\\n`` (same convention as :func:`_source_size` and
+      :func:`_tail_offset`), so a file ending in a newline reports
+      the *content* line count rather than the trailing
+      terminator as a phantom row.
+    * An empty source reports ``(0, 0, 0, 0, 0.0)`` — zero
+      everything, the natural "nothing to count" shape. The
+      divergent ``(1, 0)`` answer from :func:`_source_size` on
+      the same input is the "what would the renderer show?"
+      answer; the stats answer is the "how much content is
+      there?" answer, and they differ on purpose.
+    * ``chars`` is measured in code points (``len(source)``), not
+      bytes, so a multi-byte CJK source counts the same way the
+      renderer counts it.
+    * ``max_line_width`` is measured in code points, same
+      convention as :func:`_source_size`'s ``max_cols``.
+    * ``mean_line_width`` is rounded to 2 decimal places via
+      :func:`round` (banker's rounding — ``0.5`` rounds to the
+      nearest even integer, but the test suite uses values that
+      don't sit on the half so the behaviour is deterministic).
+      The output is always a real ``float`` so JSON serialisation
+      stays predictable (``"mean_line_width": 1.5``, never
+      ``"mean_line_width": "1.5"``).
+    """
+    if not source:
+        return (0, 0, 0, 0, 0.0)
+    lines = source.split("\n")
+    if lines and lines[-1] == "" and source.endswith("\n"):
+        lines = lines[:-1]
+    if not lines:
+        return (0, 0, 0, 0, 0.0)
+    widths = [len(line) for line in lines]
+    non_blank = sum(1 for line in lines if line.strip())
+    mean_width = round(sum(widths) / len(widths), 2)
+    return (
+        len(source),
+        len(lines),
+        non_blank,
+        max(widths),
+        mean_width,
+    )
+
+
+def _stats_to_text(stats: SourceStats) -> str:
+    """Render a :data:`SourceStats` as a 5-line fixed ``key: value`` block.
+
+    Parallel to :func:`whisperpaw._screen.describe_to_text` —
+    fixed format, predictable layout, easy to grep / awk. Each
+    field is on its own line so a downstream consumer can pick
+    any one of them with a one-line selector. ``mean_line_width``
+    is rendered with a stable 2-decimal format (``1.50``, not
+    ``1.5``) so the layout is predictable for a downstream
+    ``awk`` / ``cut`` / ``column`` pipeline; ``int`` fields use
+    the obvious ``%d`` so a ``stats.txt`` file sorted by line
+    number is human-readable.
+    """
+    chars, lines, non_blank, max_w, mean_w = stats
+    return (
+        f"chars: {chars}\n"
+        f"lines: {lines}\n"
+        f"non_blank_lines: {non_blank}\n"
+        f"max_line_width: {max_w}\n"
+        f"mean_line_width: {mean_w:.2f}"
+    )
+
+
+def _stats_to_json(stats: SourceStats) -> str:
+    """Render a :data:`SourceStats` as a single-line parseable JSON object.
+
+    Parallel to :func:`whisperpaw._screen.describe_to_json` and
+    :func:`_size_to_json` — the shape is fixed so ``jq '.chars'``
+    and friends work without further coercion. Single-line,
+    sorted keys, ``ensure_ascii=False``. ``mean_line_width`` is
+    emitted as a JSON number (not a string) so the field can be
+    compared numerically.
+    """
+    chars, lines, non_blank, max_w, mean_w = stats
+    return json.dumps(
+        {
+            "chars": chars,
+            "lines": lines,
+            "max_line_width": max_w,
+            "mean_line_width": mean_w,
+            "non_blank_lines": non_blank,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+
+
 def _tail_and_render(
     path: str,
     cfg: ZoomConfig,
@@ -819,11 +949,35 @@ def build_parser() -> argparse.ArgumentParser:
             "({'rows': N, 'cols': M}). The text-side analog of "
             "--info: --info answers 'what screen-capture setup "
             "would I get?'; --size answers 'how big is the "
-            "source?'. Mutually exclusive with --info, --live, "
-            "--follow, --max-frames, --snapshot, --raw, and "
-            "--list-backends (all of them exist to drive a "
+            "source?'. Mutually exclusive with --info, --stats, "
+            "--live, --follow, --max-frames, --snapshot, --raw, "
+            "and --list-backends (all of them exist to drive a "
             "render or a different discovery; --size is the "
             "smallest discovery there is)."
+        ),
+    )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        dest="stats",
+        help=(
+            "Print per-source statistics (chars, lines, "
+            "non-blank lines, max line width, mean line width) "
+            "and exit 0 without rendering or capturing anything. "
+            "The source is resolved exactly the way it would be "
+            "for a render (positional -> --file -> stdin -> "
+            "--screen with --backend/--region/--fake-grid for "
+            "screen capture), then counted. The text-side "
+            "counterpart of --size: --size answers 'how big is "
+            "the source as a rectangle?'; --stats answers 'what "
+            "is in the source?'. Combine with --json for a "
+            "single-line parseable object ({'chars': N, 'lines': "
+            "M, 'non_blank_lines': K, 'max_line_width': W, "
+            "'mean_line_width': X.XX}). Mutually exclusive with "
+            "--size, --info, --live, --follow, --max-frames, "
+            "--snapshot, --raw, and --list-backends (all of "
+            "them exist to drive a render or a different "
+            "discovery; --stats is the 'counting' discovery)."
         ),
     )
     # v0.2: screen-capture flags. The group lives behind
@@ -851,14 +1005,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="as_json",
         help=(
-            "Combine with --list-backends, --info, or --size to emit "
-            "a single-line JSON object instead of the default text "
-            "output. --list-backends --json -> {'backends': [...]}; "
-            "--info --json -> {'backend': ..., 'available': ..., "
-            "'adapter': ..., 'screen_size': [w, h], 'region': "
-            "[x, y, w, h]}; --size --json -> {'rows': N, 'cols': M}. "
-            "Using --json without --list-backends, --info, or --size "
-            "is a usage error (exit 2)."
+            "Combine with --list-backends, --info, --size, or "
+            "--stats to emit a single-line JSON object instead of "
+            "the default text output. --list-backends --json -> "
+            "{'backends': [...]}; --info --json -> {'backend': "
+            "..., 'available': ..., 'adapter': ..., "
+            "'screen_size': [w, h], 'region': [x, y, w, h]}; "
+            "--size --json -> {'rows': N, 'cols': M}; --stats "
+            "--json -> {'chars': N, 'lines': M, "
+            "'non_blank_lines': K, 'max_line_width': W, "
+            "'mean_line_width': X.XX}. Using --json without "
+            "--list-backends, --info, --size, or --stats is a "
+            "usage error (exit 2)."
         ),
     )
     return parser
@@ -896,17 +1054,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # --size is the text-source-side analog of --info: a
     # metadata-only mode that exits 0 before any render. It
     # contradicts the same render-driving flags --info does,
-    # plus the other discovery flags (--info, --list-backends)
-    # because each one is a different kind of discovery and we
-    # don't want to emit more than one of them per invocation.
-    # We run this check *before* the value-of-flag checks below
-    # (e.g. ``--live requires --file or --screen``) so the
-    # mutual-exclusion message wins when both would fire —
-    # the contradiction between the two flags is the more
-    # useful diagnostic.
+    # plus the other discovery flags (--info, --stats,
+    # --list-backends) because each one is a different kind of
+    # discovery and we don't want to emit more than one of them
+    # per invocation. We run this check *before* the
+    # value-of-flag checks below (e.g. ``--live requires --file
+    # or --screen``) so the mutual-exclusion message wins when
+    # both would fire — the contradiction between the two flags
+    # is the more useful diagnostic.
     if args.size:
         for flag, value in (
             ("--info", args.info),
+            ("--stats", args.stats),
             ("--live", args.live),
             ("--follow", args.follow),
             ("--max-frames", args.max_frames),
@@ -918,6 +1077,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 print(
                     f"paw-zoom: --size cannot be combined with {flag} "
                     f"(--size is a metadata-only mode that exits "
+                    f"before any render or other discovery)",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
+    # --stats is the *counting* discovery — the text-side
+    # counterpart of --size. It runs through the same
+    # source-resolution block --size does (so the source can be a
+    # text arg, --file, stdin, or a --screen capture) and
+    # short-circuits BEFORE the render / --raw block, so it
+    # contradicts the same render-driving flags --size does,
+    # plus the other discovery flags (--size, --info,
+    # --list-backends) for the same reason --size's
+    # mutual-exclusion list does: each one is a different kind
+    # of discovery, and we don't want to emit more than one of
+    # them per invocation. We run this check *after* the --size
+    # block above so --size's mutual-exclusion message wins
+    # when both would fire (the contradiction between the two
+    # discovery flags is the more useful diagnostic).
+    if args.stats:
+        for flag, value in (
+            ("--size", args.size),
+            ("--info", args.info),
+            ("--live", args.live),
+            ("--follow", args.follow),
+            ("--max-frames", args.max_frames),
+            ("--snapshot", args.snapshot),
+            ("--raw", args.raw),
+            ("--list-backends", args.list_backends),
+        ):
+            if value:
+                print(
+                    f"paw-zoom: --stats cannot be combined with {flag} "
+                    f"(--stats is a metadata-only mode that exits "
                     f"before any render or other discovery)",
                     file=sys.stderr,
                 )
@@ -1012,12 +1204,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     file=sys.stderr,
                 )
                 raise SystemExit(2)
-    # --json only pairs with --list-backends, --info, or --size.
-    # Anything else is ambiguous — an empty JSON object would be
-    # a worse failure mode than a clear stderr message.
-    if args.as_json and not (args.list_backends or args.info or args.size):
+    # --json only pairs with --list-backends, --info, --size, or
+    # --stats. Anything else is ambiguous — an empty JSON object
+    # would be a worse failure mode than a clear stderr message.
+    if args.as_json and not (
+        args.list_backends or args.info or args.size or args.stats
+    ):
         print(
-            "paw-zoom: --json requires --list-backends, --info, or --size",
+            "paw-zoom: --json requires --list-backends, --info, "
+            "--size, or --stats",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -1142,6 +1337,25 @@ def main(argv: list[str] | None = None) -> int:
             print(_size_to_json(size))
         else:
             print(_size_to_text(size))
+        return 0
+
+    # v0.2.3: --stats is the *counting* companion of --size —
+    # --size answers "how big is the source as a rectangle?"
+    # (rows × cols); --stats answers "what is in the source?"
+    # (chars / lines / non-blank lines / max line width / mean
+    # line width). It runs at the same point in the pipeline as
+    # --size (after source resolution, before the render /
+    # --raw block) so the source it counts is the source the
+    # renderer would see, and a user can pipe the same input
+    # through both flags without surprises. Mutual-exclusion
+    # is enforced in parse_args() — reaching this branch with
+    # --stats means the user asked for exactly one thing.
+    if args.stats:
+        stats = _source_stats(source)
+        if args.as_json:
+            print(_stats_to_json(stats))
+        else:
+            print(_stats_to_text(stats))
         return 0
 
     if args.raw:

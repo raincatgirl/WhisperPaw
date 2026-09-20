@@ -1620,13 +1620,13 @@ def test_main_size_mutual_exclusion_with_list_backends(capsys) -> None:
 
 def test_main_size_json_without_discovery_flag_is_usage_error(capsys) -> None:
     """``--json`` without ``--list-backends`` / ``--info`` /
-    ``--size`` is a usage error (exit 2). Same fail-fast the
-    ``--list-backends --json`` combo used to do."""
+    ``--size`` / ``--stats`` is a usage error (exit 2). Same
+    fail-fast the ``--list-backends --json`` combo used to do."""
     rc = zoom.main(["--json"])
     captured = capsys.readouterr()
     assert rc == 2
     assert (
-        "--json requires --list-backends, --info, or --size"
+        "--json requires --list-backends, --info, --size, or --stats"
         in captured.err
     )
 
@@ -1716,3 +1716,575 @@ def test_main_size_short_circuits_before_render(capsys) -> None:
         assert out.out == "1 x 0\n"
     finally:
         os.unlink(empty_path)
+
+
+# ---------------------------------------------------------------------------
+# --stats: per-source statistics discovery
+# ---------------------------------------------------------------------------
+#
+# The ``--stats`` flag answers "what is in the source?" — chars, lines,
+# non-blank lines, max line width, mean line width. It runs at the same
+# point in the pipeline as ``--size`` (after source resolution, before the
+# render / ``--raw`` block) so the source it counts is the source the
+# renderer would see, and a user can pipe the same input through both
+# flags without surprises. The conventions intentionally match
+# ``_source_size`` so a script that calls ``_source_size`` and
+# ``_source_stats`` on the same string gets two consistent answers.
+
+
+def test_source_stats_basic() -> None:
+    """``"a\\nbb\\nccc"`` has 3 lines, 8 chars (counting the
+    2 newlines as 1 each), max width 3, mean width 2.0, all
+    lines non-blank."""
+    assert zoom._source_stats("a\nbb\nccc") == (8, 3, 3, 3, 2.0)
+
+
+def test_source_stats_single_line() -> None:
+    """A one-line source has 1 line and 1 non-blank line."""
+    assert zoom._source_stats("hello") == (5, 1, 1, 5, 5.0)
+
+
+def test_source_stats_empty_string() -> None:
+    """An empty source reports all zeros — the natural
+    "nothing to count" answer. Diverges from ``_source_size``
+    (which returns ``(1, 0)`` for the same input), on purpose:
+    ``--size`` answers "what would the renderer show?";
+    ``--stats`` answers "how much content is there?"."""
+    assert zoom._source_stats("") == (0, 0, 0, 0, 0.0)
+
+
+def test_source_stats_whitespace_only() -> None:
+    """A whitespace-only source has content (``chars > 0``,
+    ``lines > 0``, ``max_line_width > 0``) but zero
+    non-blank lines — every line is blank after stripping.
+    ``"   \\n   \\n   "`` is 3 lines of 3 spaces joined by
+    2 newlines: 3+1+3+1+3 = 11 chars."""
+    stats = zoom._source_stats("   \n   \n   ")
+    assert stats[0] == 11  # 3 * 3 chars of spaces + 2 newlines
+    assert stats[1] == 3
+    assert stats[2] == 0  # non_blank_lines
+    assert stats[3] == 3  # max_line_width
+    assert stats[4] == 3.0  # mean_line_width
+
+
+def test_source_stats_drops_trailing_empty_line() -> None:
+    """A source ending in ``\\n`` does not gain a phantom
+    empty line — same convention as ``_source_size`` /
+    ``_tail_offset``."""
+    assert zoom._source_stats("a\nb\n") == (4, 2, 2, 1, 1.0)
+
+
+def test_source_stats_keeps_internal_empty_lines() -> None:
+    """Internal blank lines are real rows of content (the user
+    intended them), so they are kept. ``non_blank_lines``
+    still excludes them. ``"a\\n\\nb"`` is 2 non-blank
+    lines + 1 blank line = 3 lines, 4 chars (1+1+0+1). The
+    mean width is ``(1+0+1)/3 = 0.67`` after the
+    2-decimal-place rounding."""
+    stats = zoom._source_stats("a\n\nb")
+    assert stats[0] == 4
+    assert stats[1] == 3
+    assert stats[2] == 2
+    assert stats[3] == 1
+    assert stats[4] == 0.67
+
+
+def test_source_stats_mixed_blank_and_non_blank() -> None:
+    """A real-world mix: 5 lines, 3 non-blank, max width 5,
+    mean width 3.2. Exercises the non-trivial arithmetic path."""
+    stats = zoom._source_stats("hello\n\nworld\n   \nfoo")
+    assert stats[0] == len("hello\n\nworld\n   \nfoo")
+    assert stats[1] == 5
+    assert stats[2] == 3
+    assert stats[3] == 5  # max of [5, 0, 5, 3, 3]
+    assert stats[4] == (5 + 0 + 5 + 3 + 3) / 5  # 3.2
+
+
+def test_source_stats_unicode_code_points() -> None:
+    """``chars`` is measured in code points, not bytes, so a
+    CJK source counts the same way the renderer counts it.
+    ``"猫\\n始"`` is 2 lines, 3 chars, max width 1, mean
+    width 1.0."""
+    stats = zoom._source_stats("猫\n始")
+    assert stats[0] == 3
+    assert stats[1] == 2
+    assert stats[2] == 2
+    assert stats[3] == 1
+    assert stats[4] == 1.0
+
+
+def test_source_stats_mean_rounded_to_two_decimals() -> None:
+    """The mean is rounded to 2 decimal places so JSON
+    serialisation stays predictable. ``"a\\nbb"`` has
+    mean ``3 / 2 = 1.5`` (exact)."""
+    assert zoom._source_stats("a\nbb")[4] == 1.5
+    assert zoom._source_stats("a\nbb\nccc\ndddd")[4] == 2.5
+
+
+def test_stats_to_text_format() -> None:
+    """Five ``key: value`` lines, one per field, in canonical
+    order, with ``mean_line_width`` rendered as a stable
+    2-decimal float. Easy to grep / awk."""
+    text = zoom._stats_to_text((8, 3, 3, 3, 2.0))
+    assert text == (
+        "chars: 8\n"
+        "lines: 3\n"
+        "non_blank_lines: 3\n"
+        "max_line_width: 3\n"
+        "mean_line_width: 2.00"
+    )
+
+
+def test_stats_to_text_zero_values() -> None:
+    """An all-zero ``SourceStats`` renders the same five lines
+    with all zeros — the "nothing to count" answer is
+    consistent with the other discovery flags."""
+    text = zoom._stats_to_text((0, 0, 0, 0, 0.0))
+    assert text == (
+        "chars: 0\n"
+        "lines: 0\n"
+        "non_blank_lines: 0\n"
+        "max_line_width: 0\n"
+        "mean_line_width: 0.00"
+    )
+
+
+def test_stats_to_text_mean_always_two_decimals() -> None:
+    """``mean_line_width: 1.50`` is rendered with the trailing
+    zero so the layout is predictable for a downstream
+    ``awk`` / ``cut`` / ``column`` pipeline."""
+    text = zoom._stats_to_text((5, 1, 1, 5, 1.5))
+    assert text.endswith("mean_line_width: 1.50")
+
+
+def test_stats_to_json_round_trip() -> None:
+    """``json.loads`` of ``_stats_to_json`` recovers exactly
+    the input ``SourceStats``. The shape mirrors the
+    ``_size_to_json`` and ``describe_to_json`` style."""
+    stats = (8, 3, 3, 3, 2.0)
+    parsed = json.loads(zoom._stats_to_json(stats))
+    assert parsed == {
+        "chars": 8,
+        "lines": 3,
+        "max_line_width": 3,
+        "mean_line_width": 2.0,
+        "non_blank_lines": 3,
+    }
+
+
+def test_stats_to_json_keys_sorted() -> None:
+    """Keys are alphabetically sorted so a diff is
+    deterministic across runs / platforms."""
+    parsed = json.loads(zoom._stats_to_json((8, 3, 3, 3, 2.0)))
+    assert list(parsed.keys()) == sorted(parsed.keys())
+
+
+def test_stats_to_json_mean_is_json_number() -> None:
+    """``mean_line_width`` is emitted as a JSON number, not a
+    string, so a downstream ``jq '.mean_line_width > 1'`` works
+    without further coercion."""
+    raw = zoom._stats_to_json((5, 1, 1, 5, 1.5))
+    assert '"mean_line_width": 1.5' in raw
+
+
+def test_parse_args_stats_default_is_false() -> None:
+    """``--stats`` defaults to off; existing behaviour is
+    preserved for every flag combination that does not
+    mention ``--stats``."""
+    args = zoom.parse_args(["hello"])
+    assert args.stats is False
+
+
+def test_parse_args_stats_flag_sets_true() -> None:
+    """``--stats`` parses to ``True`` and composes with all
+    three source-resolution paths (positional, ``--file``,
+    ``--screen``)."""
+    assert zoom.parse_args(["--stats", "hello"]).stats is True
+    assert (
+        zoom.parse_args(["--stats", "--file", "/tmp/whatever"]).stats is True
+    )
+    assert (
+        zoom.parse_args(["--stats", "--screen", "--backend", "fake"]).stats
+        is True
+    )
+
+
+def test_main_stats_positional_text_mode(capsys) -> None:
+    """``paw-zoom --stats "a\\nbb\\nccc"`` prints the
+    5-line ``key: value`` block and exits 0 without any
+    rendering. 8 chars total (3 + 1 + 2 + 1 + 3)."""
+    rc = zoom.main(["--stats", "a\nbb\nccc"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert out.out == (
+        "chars: 8\n"
+        "lines: 3\n"
+        "non_blank_lines: 3\n"
+        "max_line_width: 3\n"
+        "mean_line_width: 2.00\n"
+    )
+    assert out.err == ""
+
+
+def test_main_stats_positional_multiline(capsys) -> None:
+    """``paw-zoom --stats "abc\\ndefg"`` reports 2 lines, 8
+    chars, max width 4, mean 3.5."""
+    rc = zoom.main(["--stats", "abc\ndefg"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert out.out == (
+        "chars: 8\n"
+        "lines: 2\n"
+        "non_blank_lines: 2\n"
+        "max_line_width: 4\n"
+        "mean_line_width: 3.50\n"
+    )
+
+
+def test_main_stats_json_mode(capsys) -> None:
+    """``paw-zoom --stats --json "a\\nbb\\nccc"`` prints a
+    single-line ``{"chars": 8, ...}`` object and exits 0.
+    The shape matches the ``describe_to_json`` /
+    ``to_json`` style the rest of the discovery flags use.
+    8 chars total (3 + 1 + 2 + 1 + 3)."""
+    rc = zoom.main(["--stats", "--json", "a\nbb\nccc"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "\n" not in out.out.rstrip("\n")
+    parsed = json.loads(out.out)
+    assert parsed == {
+        "chars": 8,
+        "lines": 3,
+        "max_line_width": 3,
+        "mean_line_width": 2.0,
+        "non_blank_lines": 3,
+    }
+
+
+def test_main_stats_file_source(tmp_path, capsys) -> None:
+    """``--stats --file PATH`` reads the file and reports its
+    statistics. Sanity-checks the ``--file`` path of source
+    resolution for ``--stats``."""
+    p = tmp_path / "hello.txt"
+    p.write_text("hi\nworld", encoding="utf-8")
+    rc = zoom.main(["--stats", "--file", str(p)])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert out.out == (
+        "chars: 8\n"
+        "lines: 2\n"
+        "non_blank_lines: 2\n"
+        "max_line_width: 5\n"
+        "mean_line_width: 3.50\n"
+    )
+
+
+def test_main_stats_file_missing_is_error(tmp_path, capsys) -> None:
+    """``--stats --file /missing`` exits 1 with a clear stderr
+    message — the file-not-found path is the same one
+    ``_resolve_source`` raises, and ``--stats`` doesn't try
+    to be cleverer than that."""
+    missing = tmp_path / "does-not-exist.txt"
+    rc = zoom.main(["--stats", "--file", str(missing)])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "file not found" in captured.err
+
+
+def test_main_stats_with_screen_capture(capsys) -> None:
+    """``--stats --screen --backend fake --fake-grid "abc\\nde"``
+    captures the fake screen and reports the captured grid's
+    statistics. ``FakeScreen`` truncates every row to the
+    *shortest* row's width (a monospace text grid has no
+    notion of row N being wider than row M), so the
+    captured grid is ``"ab\\nde"`` — 5 chars (2 + 1 + 2),
+    2 lines, max width 2, mean 2.0."""
+    rc = zoom.main(
+        [
+            "--stats",
+            "--screen",
+            "--backend", "fake",
+            "--fake-grid", "abc\nde",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    assert out.out == (
+        "chars: 5\n"
+        "lines: 2\n"
+        "non_blank_lines: 2\n"
+        "max_line_width: 2\n"
+        "mean_line_width: 2.00\n"
+    )
+
+
+def test_main_stats_with_screen_capture_json(capsys) -> None:
+    """``--stats --json --screen --backend fake --fake-grid
+    "abc\\nde"`` combines the screen-capture path with the
+    JSON output mode. Round-trips through ``json.loads``.
+    Same ``FakeScreen`` row-truncation as the text-mode
+    test (captured grid: ``"ab\\nde"`` = 5 chars)."""
+    rc = zoom.main(
+        [
+            "--stats", "--json",
+            "--screen",
+            "--backend", "fake",
+            "--fake-grid", "abc\nde",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    parsed = json.loads(out.out)
+    assert parsed == {
+        "chars": 5,
+        "lines": 2,
+        "max_line_width": 2,
+        "mean_line_width": 2.0,
+        "non_blank_lines": 2,
+    }
+
+
+def test_main_stats_with_unsupported_screen_backend_exits_1(capsys) -> None:
+    """``--stats --screen --backend x11`` on a headless box
+    exits 1 with the friendly 'not yet implemented on this
+    OS' message — the screen-capture failure path still
+    applies; ``--stats`` is just a different *consumer* of
+    the resolved source."""
+    rc = zoom.main(["--stats", "--screen", "--backend", "x11"])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "not yet implemented" in captured.err
+
+
+def test_main_stats_without_any_source_exits_2(capsys) -> None:
+    """``--stats`` with no positional, no ``--file``, no
+    ``--screen`` (and stdin empty because the conftest
+    forces ``WPAW_ZOOM_STDIN_OVERRIDE=""``) is a usage
+    error (exit 2) — there is literally no source to
+    count."""
+    rc = zoom.main(["--stats"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "no text to magnify" in captured.err
+
+
+def test_main_stats_mutual_exclusion_with_size(capsys) -> None:
+    """``--stats --size`` is rejected (exit 2) — they are
+    two different kinds of discovery and we don't want to
+    emit more than one of them per invocation. The
+    ``--size``-wins-on-tie rule means the message names
+    ``--size`` as the offender, not ``--stats``."""
+    rc = zoom.main(["--stats", "--size", "x"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--size cannot be combined with --stats" in captured.err
+
+
+def test_main_stats_mutual_exclusion_with_info(capsys) -> None:
+    """``--stats --info`` is rejected (exit 2) — they are
+    two different kinds of discovery (``--info`` is
+    screen-capture-side, ``--stats`` is text-side)."""
+    rc = zoom.main(["--stats", "--info", "--screen"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--stats cannot be combined with --info" in captured.err
+
+
+def test_main_stats_mutual_exclusion_with_live(capsys) -> None:
+    """``--stats --live`` is rejected (exit 2) — ``--live``
+    is a render driver, ``--stats`` is metadata-only."""
+    rc = zoom.main(["--stats", "--live", "x"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--stats cannot be combined with --live" in captured.err
+
+
+def test_main_stats_mutual_exclusion_with_follow(capsys) -> None:
+    """``--stats --follow`` is rejected (exit 2) — same
+    rationale as ``--live``."""
+    rc = zoom.main(["--stats", "--follow", "x"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--stats cannot be combined with --follow" in captured.err
+
+
+def test_main_stats_mutual_exclusion_with_max_frames(capsys) -> None:
+    """``--stats --max-frames N`` is rejected (exit 2)."""
+    rc = zoom.main(["--stats", "--max-frames", "3", "x"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--stats cannot be combined with --max-frames" in captured.err
+
+
+def test_main_stats_mutual_exclusion_with_snapshot(capsys) -> None:
+    """``--stats --snapshot PATH`` is rejected (exit 2). The
+    snapshot file must NOT have been written — the
+    contradiction is caught before the source-resolution
+    block, so we never even reach the file-write step."""
+    rc = zoom.main(
+        [
+            "--stats",
+            "--snapshot", "/tmp/should_not_be_written_stats.txt",
+            "x",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--stats cannot be combined with --snapshot" in captured.err
+    assert not os.path.exists("/tmp/should_not_be_written_stats.txt")
+
+
+def test_main_stats_mutual_exclusion_with_raw(capsys) -> None:
+    """``--stats --raw`` is rejected (exit 2) — ``--raw`` is
+    a dump mode, ``--stats`` is metadata-only."""
+    rc = zoom.main(["--stats", "--raw", "x"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--stats cannot be combined with --raw" in captured.err
+
+
+def test_main_stats_mutual_exclusion_with_list_backends(capsys) -> None:
+    """``--stats --list-backends`` is rejected (exit 2) —
+    they are two different kinds of discovery and we don't
+    want to emit more than one of them per invocation."""
+    rc = zoom.main(["--stats", "--list-backends"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert (
+        "--stats cannot be combined with --list-backends" in captured.err
+    )
+
+
+def test_main_stats_json_without_discovery_flag_is_usage_error(capsys) -> None:
+    """``--json`` without ``--list-backends`` / ``--info`` /
+    ``--size`` / ``--stats`` is a usage error (exit 2).
+    Same fail-fast the ``--list-backends --json`` combo
+    used to do."""
+    rc = zoom.main(["--json"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert (
+        "--json requires --list-backends, --info, --size, or --stats"
+        in captured.err
+    )
+
+
+def test_main_stats_with_malformed_fake_grid_is_usage_error(capsys) -> None:
+    """``--stats --screen --backend fake --fake-grid ''`` (an
+    empty fake grid) is rejected at the parse-fake-grid
+    boundary with a clear message, not silently reported
+    as a zero-content source."""
+    rc = zoom.main(
+        [
+            "--stats",
+            "--screen",
+            "--backend", "fake",
+            "--fake-grid", "",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--fake-grid" in captured.err
+
+
+def test_main_stats_silently_ignores_viewport_flags(capsys) -> None:
+    """Viewport-modifying flags (``--zoom``, ``--rows``,
+    ``--cols``, ``--offset``, ``--col-offset``,
+    ``--charset``) are silently ignored in ``--stats`` mode
+    — the reported stats don't depend on them, so the user
+    can keep these flags in a shell alias without breaking
+    the stats report. Same spirit as ``--size``'s and
+    ``--raw``'s silent viewport-flag ignoring."""
+    rc = zoom.main(
+        [
+            "--stats",
+            "--zoom", "8",
+            "--rows", "1",
+            "--cols", "80",
+            "--offset", "5",
+            "--col-offset", "10",
+            "--charset", "dot",
+            "hello world",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The stats are the literal source — no magnification, no
+    # offsets, no viewport math applied.
+    assert out == (
+        "chars: 11\n"
+        "lines: 1\n"
+        "non_blank_lines: 1\n"
+        "max_line_width: 11\n"
+        "mean_line_width: 11.00\n"
+    )
+
+
+def test_main_stats_help_text_mentions_flag(capsys) -> None:
+    """The ``--help`` text mentions ``--stats`` so a casual
+    ``paw-zoom --help`` user discovers it. Catches
+    accidental renames."""
+    rc = zoom.main(["--help"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "--stats" in out.out
+
+
+def test_main_stats_short_circuits_before_render(capsys) -> None:
+    """``--stats`` must NOT call ``render_viewport`` — a
+    direct proof: the render path would have built a
+    ``ZoomConfig`` and tried to magnify, but ``--stats``
+    reports the measured (chars, lines, ...) instead. We
+    exercise the empty-source path through ``--file``
+    because an empty positional is treated as "no source"
+    by ``_resolve_source`` → ``RuntimeError`` → exit 2."""
+    import tempfile
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+    ) as fh:
+        fh.write("")  # empty file
+        empty_path = fh.name
+    try:
+        rc = zoom.main(["--stats", "--file", empty_path])
+        out = capsys.readouterr()
+        assert rc == 0
+        # Empty file → empty string → (0, 0, 0, 0, 0.0).
+        # The renderer would have produced 10*40 chars of
+        # fill, not an all-zero stats block. The fact that
+        # we see all zeros proves ``--stats`` never called
+        # ``render_viewport``.
+        assert out.out == (
+            "chars: 0\n"
+            "lines: 0\n"
+            "non_blank_lines: 0\n"
+            "max_line_width: 0\n"
+            "mean_line_width: 0.00\n"
+        )
+    finally:
+        os.unlink(empty_path)
+
+
+def test_main_stats_consistent_with_size(tmp_path, capsys) -> None:
+    """``--size`` and ``--stats`` describe the same source
+    with two consistent views: ``--size`` reports the
+    *rectangle* (rows, cols); ``--stats`` reports the
+    *content* (chars, lines, non-blank lines, max line
+    width, mean line width). For a clean ASCII file,
+    ``stats.lines == size.rows`` and
+    ``stats.max_line_width == size.cols`` — that is the
+    invariant a user can rely on when chaining the two
+    flags."""
+    p = tmp_path / "mixed.txt"
+    p.write_text("hi\nworld", encoding="utf-8")
+    zoom.main(["--size", "--file", str(p)])
+    size_out = capsys.readouterr().out
+    zoom.main(["--stats", "--file", str(p)])
+    stats_out = capsys.readouterr().out
+    # Parse the size: "2 x 5"
+    size_rows, size_cols = (int(x) for x in size_out.split(" x "))
+    # Parse the stats: 5-line key: value block.
+    stats_lines = dict(
+        line.split(": ", 1) for line in stats_out.strip().split("\n")
+    )
+    assert int(stats_lines["lines"]) == size_rows
+    assert int(stats_lines["max_line_width"]) == size_cols

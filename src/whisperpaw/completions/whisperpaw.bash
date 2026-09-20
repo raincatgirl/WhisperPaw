@@ -55,13 +55,13 @@ _paw_complete_paw_watch() {
 complete -F _paw_complete_paw_watch paw-watch
 
 _paw_zoom_flags() {
-  COMPREPLY=(--file --rows --cols --offset --col-offset --zoom --charset --quiet --snapshot --live --interval --follow --max-frames --raw --size --screen --region --backend --fake-grid --list-backends --info --json)
+  COMPREPLY=(--file --rows --cols --offset --col-offset --zoom --charset --quiet --snapshot --live --interval --follow --max-frames --raw --size --stats --screen --region --backend --fake-grid --list-backends --info --json)
 }
 _paw_complete_paw_zoom() {
   local cur prev
   cur="${COMP_WORDS[COMP_CWORD]}"
   if [[ "$cur" == --* ]]; then
-    COMPREPLY=($(compgen -W '--file --rows --cols --offset --col-offset --zoom --charset --quiet --snapshot --live --interval --follow --max-frames --raw --size --screen --region --backend --fake-grid --list-backends --info --json' -- "$cur"))
+    COMPREPLY=($(compgen -W '--file --rows --cols --offset --col-offset --zoom --charset --quiet --snapshot --live --interval --follow --max-frames --raw --size --stats --screen --region --backend --fake-grid --list-backends --info --json' -- "$cur"))
     return 0
   fi
   # No subcommands; nothing else to complete.
