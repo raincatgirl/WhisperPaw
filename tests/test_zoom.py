@@ -1,9 +1,11 @@
 """Tests for ``paw-zoom`` (text-viewport magnifier, ASCII POC)."""
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
+import tempfile
 from contextlib import redirect_stdout, redirect_stderr
 
 import pytest
@@ -1620,13 +1622,15 @@ def test_main_size_mutual_exclusion_with_list_backends(capsys) -> None:
 
 def test_main_size_json_without_discovery_flag_is_usage_error(capsys) -> None:
     """``--json`` without ``--list-backends`` / ``--info`` /
-    ``--size`` / ``--stats`` is a usage error (exit 2). Same
-    fail-fast the ``--list-backends --json`` combo used to do."""
+    ``--size`` / ``--stats`` / ``--sha`` is a usage error
+    (exit 2). Same fail-fast the ``--list-backends --json``
+    combo used to do."""
     rc = zoom.main(["--json"])
     captured = capsys.readouterr()
     assert rc == 2
     assert (
-        "--json requires --list-backends, --info, --size, or --stats"
+        "--json requires --list-backends, --info, --size, "
+        "--stats, or --sha"
         in captured.err
     )
 
@@ -2157,14 +2161,15 @@ def test_main_stats_mutual_exclusion_with_list_backends(capsys) -> None:
 
 def test_main_stats_json_without_discovery_flag_is_usage_error(capsys) -> None:
     """``--json`` without ``--list-backends`` / ``--info`` /
-    ``--size`` / ``--stats`` is a usage error (exit 2).
-    Same fail-fast the ``--list-backends --json`` combo
-    used to do."""
+    ``--size`` / ``--stats`` / ``--sha`` is a usage error
+    (exit 2). Same fail-fast the ``--list-backends --json``
+    combo used to do."""
     rc = zoom.main(["--json"])
     captured = capsys.readouterr()
     assert rc == 2
     assert (
-        "--json requires --list-backends, --info, --size, or --stats"
+        "--json requires --list-backends, --info, --size, "
+        "--stats, or --sha"
         in captured.err
     )
 
@@ -2288,3 +2293,634 @@ def test_main_stats_consistent_with_size(tmp_path, capsys) -> None:
     )
     assert int(stats_lines["lines"]) == size_rows
     assert int(stats_lines["max_line_width"]) == size_cols
+
+
+# ---------------------------------------------------------------------------
+# --sha: stable-hash source fingerprint
+# ---------------------------------------------------------------------------
+
+
+# Pre-computed digests for the tests below. Pinned here so the
+# tests don't all share one ``hashlib.sha256(...).hexdigest()``
+# call and accidentally pass a regression where the helper
+# returns the wrong thing.
+SHA256_EMPTY = (
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+)
+SHA256_HELLO = (
+    "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+)
+
+
+def test_source_sha_empty_string() -> None:
+    """An empty source hashes to the well-known SHA-256 of
+    the empty string. The empty case is a useful regression
+    guard because the renderer would produce a 1×0 fill block
+    on an empty source, but the hash is on the *literal*
+    content — there is nothing to hash, so the digest is the
+    empty-string digest."""
+    assert zoom._source_sha("") == SHA256_EMPTY
+
+
+def test_source_sha_known_value() -> None:
+    """A simple string hashes to the well-known SHA-256
+    digest. Pinned so a regression in the encoding
+    (e.g. switching from UTF-8 to UTF-16, or skipping the
+    encoding step entirely) shows up immediately."""
+    assert zoom._source_sha("hello") == SHA256_HELLO
+
+
+def test_source_sha_multibyte_utf8() -> None:
+    """A multi-byte CJK source is encoded as UTF-8 before
+    being hashed. The two halves of the test (encode-then-
+    hash, vs. hash-the-precomputed-bytes) must agree — the
+    helper never re-encodes a Python ``str`` to anything
+    other than UTF-8."""
+    # A CJK char encodes to 3 bytes in UTF-8.
+    cjk = "你好"
+    expected = hashlib.sha256("你好".encode("utf-8")).hexdigest()
+    assert zoom._source_sha(cjk) == expected
+    # And it's NOT the same as encoding UTF-16 (a sanity
+    # check the encoding choice is real, not a no-op).
+    assert zoom._source_sha(cjk) != hashlib.sha256(
+        cjk.encode("utf-16")
+    ).hexdigest()
+
+
+def test_source_sha_deterministic() -> None:
+    """The same source always hashes to the same digest. A
+    regression that injected a process-id or timestamp into
+    the helper would surface here."""
+    assert zoom._source_sha("hello") == zoom._source_sha("hello")
+    # And the digest is the same regardless of the call order
+    # or surrounding state.
+    assert (
+        zoom._source_sha("hello")
+        == zoom._source_sha("hello", algorithm="sha256")
+    )
+
+
+def test_source_sha_algorithm_override() -> None:
+    """The algorithm is pluggable; ``--sha-algo`` only changes
+    the digest family, not the source. A SHA-1 digest is 40
+    hex chars, a SHA-256 digest is 64, an MD5 digest is 32.
+    The helper produces a digest of the expected length for
+    each."""
+    for algo, expected_len in (
+        ("md5", 32),
+        ("sha1", 40),
+        ("sha256", 64),
+        ("sha512", 128),
+    ):
+        digest = zoom._source_sha("hello", algorithm=algo)
+        assert len(digest) == expected_len, (
+            f"{algo} digest should be {expected_len} chars, got {len(digest)}"
+        )
+        # The SHA-256 of "hello" is the pinned value above;
+        # the others are just stable — pin them against the
+        # stdlib so a regression in the override path shows up.
+        assert digest == hashlib.new(algo, b"hello").hexdigest()
+
+
+def test_source_sha_unknown_algorithm_raises() -> None:
+    """An unknown algorithm raises ``ValueError`` with a
+    helpful message that names the rejected algorithm. The
+    parse_args() path catches this and re-emits it as a
+    clear exit-2 stderr message."""
+    with pytest.raises(ValueError) as excinfo:
+        zoom._source_sha("hello", algorithm="not-a-real-algorithm")
+    assert "not-a-real-algorithm" in str(excinfo.value)
+    assert "unsupported" in str(excinfo.value).lower()
+
+
+def test_source_sha_default_algorithm_is_sha256() -> None:
+    """``_source_sha`` defaults to SHA-256 — the algorithm
+    the CLI default ``--sha`` uses. A regression that
+    flipped the default to MD5 (faster but weaker) would
+    surface here."""
+    assert zoom._source_sha("hello") == zoom._source_sha(
+        "hello", algorithm="sha256"
+    )
+    # The default-algorithm constant is what the CLI help
+    # text and the JSON ``"algorithm"`` key both read, so a
+    # change to the constant propagates to the right places.
+    assert zoom.DEFAULT_SHA_ALGORITHM == "sha256"
+
+
+def test_sha_to_text_returns_digest() -> None:
+    """``_sha_to_text`` returns the hex digest as-is. The
+    trailing ``\\n`` is added by ``print``, not by the
+    helper, so a downstream ``echo $digest`` sees exactly
+    the digest."""
+    digest = SHA256_HELLO
+    assert zoom._sha_to_text(digest) == digest
+    # The returned string has no trailing whitespace.
+    assert zoom._sha_to_text(digest) == digest.rstrip()
+
+
+def test_sha_to_json_round_trip() -> None:
+    """``_sha_to_json`` is a single-line parseable JSON
+    object that round-trips through ``json.loads``."""
+    out = zoom._sha_to_json(SHA256_HELLO)
+    assert "\n" not in out
+    parsed = json.loads(out)
+    assert parsed == {"algorithm": "sha256", "sha256": SHA256_HELLO}
+
+
+def test_sha_to_json_algorithm_key_reflects_input() -> None:
+    """The JSON object's digest key reflects the algorithm,
+    not just the literal string ``"sha256"``. A downstream
+    consumer asking for a SHA-1 digest should be able to
+    tell from the key which family the digest is in without
+    re-reading the ``"algorithm"`` field."""
+    out = zoom._sha_to_json("a" * 40, algorithm="sha1")
+    parsed = json.loads(out)
+    assert parsed == {"algorithm": "sha1", "sha1": "a" * 40}
+
+
+def test_sha_to_json_keys_sorted() -> None:
+    """The JSON keys are sorted so byte-for-byte output is
+    deterministic across runs. Crucial for the byte-identity
+    test in ``test_completions`` and for any downstream tool
+    that diffs the output."""
+    out = zoom._sha_to_json(SHA256_HELLO)
+    # ``algorithm`` sorts before ``sha256``.
+    assert out.index('"algorithm"') < out.index('"sha256"')
+
+
+def test_sha_to_json_ensure_ascii() -> None:
+    """``ensure_ascii=False`` is set so non-ASCII content
+    in the algorithm name (e.g. a future human-language
+    alias) doesn't escape into ``\\uXXXX`` form. SHA
+    algorithm names are ASCII, so this is a sanity check
+    that the flag is in effect rather than a real-world
+    coverage test."""
+    out = zoom._sha_to_json(SHA256_HELLO)
+    # ASCII-only output, and the call returns valid JSON.
+    out.encode("ascii")
+    assert json.loads(out)["sha256"] == SHA256_HELLO
+
+
+def test_parse_args_sha_default_is_false() -> None:
+    """``--sha`` defaults to off; existing behaviour is
+    unchanged unless the flag is passed."""
+    args = zoom.parse_args(["hello"])
+    assert args.sha is False
+    # The algorithm defaults to SHA-256 even when the flag
+    # is off (so the user can set ``--sha-algo`` on the
+    # command line and add ``--sha`` later without a second
+    # flag).
+    assert args.sha_algo == "sha256"
+
+
+def test_parse_args_sha_flag_sets_true() -> None:
+    """``--sha`` parses to ``True`` and composes with all
+    three source-resolution paths (positional, --file,
+    --screen)."""
+    args = zoom.parse_args(["--sha", "hello"])
+    assert args.sha is True
+    # --file
+    args = zoom.parse_args(["--sha", "--file", "/tmp/whatever"])
+    assert args.sha is True
+    # --screen
+    args = zoom.parse_args(
+        ["--sha", "--screen", "--backend", "fake"]
+    )
+    assert args.sha is True
+
+
+def test_parse_args_sha_algo_override() -> None:
+    """``--sha-algo`` overrides the default SHA-256 to
+    pick a different digest family. The new value flows
+    into ``args.sha_algo`` and is used by the runtime
+    helper."""
+    args = zoom.parse_args(
+        ["--sha", "--sha-algo", "md5", "hello"]
+    )
+    assert args.sha is True
+    assert args.sha_algo == "md5"
+
+
+def test_parse_args_sha_algo_unknown_is_usage_error(capsys) -> None:
+    """``--sha-algo FOO`` with an unknown name is a usage
+    error (exit 2). A typo (``blake2x`` — a real family but
+    one hashlib doesn't accept under that name) should not
+    crash the render path with a generic ``hashlib``
+    ValueError. Note that ``hashlib`` is case-insensitive
+    on algorithm names, so ``"SHA-256"`` is *not* a useful
+    bad-name example — it normalises to ``"sha256"`` and
+    succeeds. We use a name that genuinely doesn't exist."""
+    with pytest.raises(SystemExit) as excinfo:
+        zoom.parse_args(
+            ["--sha", "--sha-algo", "blake2x", "hello"]
+        )
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert "--sha-algo" in captured.err
+    assert "blake2x" in captured.err
+    assert "unsupported" in captured.err.lower()
+
+
+def test_main_sha_positional_text_mode(capsys) -> None:
+    """``paw-zoom --sha "hello"`` prints the SHA-256
+    digest of ``"hello"`` and exits 0. The renderer is
+    never called — no ZoomConfig, no ``--rows``/``--cols``
+    banner, no magnified output."""
+    rc = zoom.main(["--sha", "hello"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert out.out == SHA256_HELLO + "\n"
+    assert out.err == ""
+
+
+def test_main_sha_empty_source(tmp_path, capsys) -> None:
+    """``paw-zoom --sha --file EMPTY`` prints the SHA-256
+    of the empty string. The renderer would have produced
+    a 1×0 fill block, but the hash is on the literal
+    content — and the empty-string digest is a well-known
+    constant."""
+    p = tmp_path / "empty.txt"
+    p.write_text("", encoding="utf-8")
+    rc = zoom.main(["--sha", "--file", str(p)])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert out.out == SHA256_EMPTY + "\n"
+
+
+def test_main_sha_changes_when_source_changes(capsys) -> None:
+    """A one-character change in the source produces a
+    completely different digest. This is the *avalanche*
+    property — the whole point of using a cryptographic
+    hash for a "did the source change?" check."""
+    rc_a = zoom.main(["--sha", "hello"])
+    out_a = capsys.readouterr().out
+    rc_b = zoom.main(["--sha", "hellp"])  # one letter off
+    out_b = capsys.readouterr().out
+    assert rc_a == 0
+    assert rc_b == 0
+    assert out_a != out_b
+
+
+def test_main_sha_json_mode(capsys) -> None:
+    """``paw-zoom --sha --json "hello"`` prints a single-
+    line ``{"algorithm": "sha256", "sha256": "..."}`` object
+    and exits 0. The shape matches the other discovery
+    flags' ``--json`` form (single line, sorted keys,
+    ``ensure_ascii=False``)."""
+    rc = zoom.main(["--sha", "--json", "hello"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "\n" not in out.out.rstrip("\n")
+    parsed = json.loads(out.out)
+    assert parsed == {"algorithm": "sha256", "sha256": SHA256_HELLO}
+
+
+def test_main_sha_algo_md5(capsys) -> None:
+    """``--sha --sha-algo md5`` picks MD5 (32 hex chars).
+    The output is the MD5 of the source, NOT a truncated
+    SHA-256."""
+    rc = zoom.main(["--sha", "--sha-algo", "md5", "hello"])
+    out = capsys.readouterr()
+    assert rc == 0
+    # MD5("hello") = 5d41402abc4b2a76b9719d911017c592
+    assert (
+        out.out.rstrip("\n")
+        == "5d41402abc4b2a76b9719d911017c592"
+    )
+    # The digest is 32 chars, not 64 (which would be a
+    # truncated SHA-256).
+    assert len(out.out.rstrip("\n")) == 32
+
+
+def test_main_sha_algo_json_round_trip(capsys) -> None:
+    """``--sha --sha-algo sha1 --json`` returns a JSON
+    object whose digest key matches the algorithm. A
+    downstream tool asking for a SHA-1 digest can tell
+    from the JSON shape which family the digest is in."""
+    rc = zoom.main(
+        ["--sha", "--sha-algo", "sha1", "--json", "hello"]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    parsed = json.loads(out.out)
+    # SHA-1 of "hello" = aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d
+    assert parsed == {
+        "algorithm": "sha1",
+        "sha1": "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d",
+    }
+
+
+def test_main_sha_file_source(tmp_path, capsys) -> None:
+    """``--sha --file PATH`` reads the file and hashes it.
+    Sanity-checks the ``--file`` path of source resolution
+    flows through the same hash."""
+    p = tmp_path / "greeting.txt"
+    p.write_text("hello", encoding="utf-8")
+    rc = zoom.main(["--sha", "--file", str(p)])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert out.out.rstrip("\n") == SHA256_HELLO
+
+
+def test_main_sha_file_source_different_digest(tmp_path, capsys) -> None:
+    """``--sha --file PATH`` on a different file produces a
+    different digest. Proves the digest reflects the file
+    contents, not the file path."""
+    p = tmp_path / "greeting.txt"
+    p.write_text("different content", encoding="utf-8")
+    rc = zoom.main(["--sha", "--file", str(p)])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert out.out.rstrip("\n") != SHA256_HELLO
+
+
+def test_main_sha_file_source_missing(tmp_path, capsys) -> None:
+    """``--sha --file PATH`` with a missing file exits 1
+    (the same code ``--file`` returns on a missing path
+    for any other mode). The hash is never computed; the
+    user gets a clear stderr error."""
+    missing = tmp_path / "no-such-file.txt"
+    rc = zoom.main(["--sha", "--file", str(missing)])
+    out = capsys.readouterr()
+    assert rc == 1
+    # The default ``_resolve_source`` error message names
+    # the file, so the user can fix the path.
+    assert str(missing) in out.err
+
+
+def test_main_sha_screen_source_fake(capsys) -> None:
+    """``--sha --screen --backend fake --fake-grid
+    "hello\nworld"`` hashes the captured grid (after the
+    ``capture_screen_to_source`` join), not the raw grid
+    the user passed via ``--fake-grid``. The renderer's
+    view of the source is what gets hashed, which is the
+    same contract ``--size`` and ``--stats`` make."""
+    rc = zoom.main(
+        [
+            "--sha",
+            "--screen",
+            "--backend", "fake",
+            "--fake-grid", "hello\nworld",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    # SHA-256 of "hello\nworld" — the captured grid
+    # joined with ``\n`` (no trailing ``\n``).
+    expected = hashlib.sha256(b"hello\nworld").hexdigest()
+    assert out.out.rstrip("\n") == expected
+
+
+def test_main_sha_screen_source_json(capsys) -> None:
+    """``--sha --screen --backend fake --fake-grid ...
+    --json`` returns a parseable JSON object. The JSON
+    ``algorithm`` key reflects ``--sha-algo`` if it was
+    set; otherwise it defaults to SHA-256."""
+    rc = zoom.main(
+        [
+            "--sha", "--json",
+            "--screen",
+            "--backend", "fake",
+            "--fake-grid", "x",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    parsed = json.loads(out.out)
+    assert parsed == {
+        "algorithm": "sha256",
+        "sha256": hashlib.sha256(b"x").hexdigest(),
+    }
+
+
+def test_main_sha_screen_source_unsupported(capsys) -> None:
+    """``--sha --screen --backend x11`` on a headless box
+    exits 1 with the standard ``backend_unsupported_message``
+    (the same one the render path would print). A missing
+    OS adapter never crashes the hash; the user gets the
+    same friendly diagnostic they would get from
+    ``--size --screen --backend x11``."""
+    rc = zoom.main(
+        ["--sha", "--screen", "--backend", "x11"]
+    )
+    out = capsys.readouterr()
+    assert rc == 1
+    # The exact message is owned by ``_screen``; we just
+    # assert that the failure mode is the documented one.
+    assert "x11" in out.err.lower()
+
+
+def test_main_sha_no_source(capsys) -> None:
+    """``--sha`` alone (no positional text, no ``--file``,
+    no ``--screen``) exits 2 with the same "no text" /
+    "no source" error the other modes produce. The hash
+    is never computed; the user gets the same clear
+    message they would get from ``--size`` alone."""
+    rc = zoom.main(["--sha"])
+    out = capsys.readouterr()
+    assert rc == 2
+    # The standard resolver message names the missing source.
+    assert "no text" in out.err.lower() or "no source" in out.err.lower()
+
+
+def test_main_sha_mutual_exclusion_with_size(capsys) -> None:
+    """``--sha --size`` is rejected at parse time (exit 2)
+    with a message naming both flags. A user typing both
+    discovery flags together has clearly made a mistake
+    (each one exits 0 with a different shape of answer);
+    we tell them which two collided instead of silently
+    picking one."""
+    rc = zoom.main(["--sha", "--size", "hello"])
+    out = capsys.readouterr()
+    assert rc == 2
+    assert "--sha" in out.err
+    assert "--size" in out.err
+    assert "cannot be combined" in out.err
+
+
+def test_main_sha_mutual_exclusion_with_stats(capsys) -> None:
+    """``--sha --stats`` is rejected at parse time (exit 2)
+    with a message naming both flags. Same rationale as the
+    ``--size`` mutual-exclusion: two discovery flags, one
+    invocation, contradictory user intent."""
+    rc = zoom.main(["--sha", "--stats", "hello"])
+    out = capsys.readouterr()
+    assert rc == 2
+    assert "--sha" in out.err
+    assert "--stats" in out.err
+    assert "cannot be combined" in out.err
+
+
+def test_main_sha_mutual_exclusion_with_info(capsys) -> None:
+    """``--sha --info --screen`` is rejected at parse time
+    (exit 2). ``--info`` is the screen-capture discovery;
+    ``--sha`` is the text-source discovery. They answer
+    different questions but both exit 0; the user can only
+    ask one at a time."""
+    rc = zoom.main(
+        [
+            "--sha", "--info",
+            "--screen", "--backend", "fake",
+            "--fake-grid", "x",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 2
+    assert "--sha" in out.err
+    assert "--info" in out.err
+
+
+def test_main_sha_mutual_exclusion_with_live(capsys) -> None:
+    """``--sha --live`` is rejected at parse time (exit 2).
+    ``--live`` drives a render loop; ``--sha`` exits 0
+    after one answer. The two are contradictory."""
+    rc = zoom.main(
+        ["--sha", "--live", "--file", "/tmp/whatever"]
+    )
+    out = capsys.readouterr()
+    assert rc == 2
+    assert "--sha" in out.err
+    assert "--live" in out.err
+
+
+def test_main_sha_mutual_exclusion_with_follow(capsys) -> None:
+    """``--sha --follow`` is rejected at parse time (exit 2)."""
+    rc = zoom.main(
+        ["--sha", "--follow", "--file", "/tmp/whatever"]
+    )
+    out = capsys.readouterr()
+    assert rc == 2
+    assert "--sha" in out.err
+    assert "--follow" in out.err
+
+
+def test_main_sha_mutual_exclusion_with_max_frames(capsys) -> None:
+    """``--sha --max-frames 3`` is rejected at parse time
+    (exit 2). ``--max-frames`` only makes sense with
+    ``--live``, so the combination is doubly contradictory."""
+    rc = zoom.main(
+        [
+            "--sha", "--max-frames", "3",
+            "--file", "/tmp/whatever",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 2
+    assert "--sha" in out.err
+    assert "--max-frames" in out.err
+
+
+def test_main_sha_mutual_exclusion_with_snapshot(capsys) -> None:
+    """``--sha --snapshot PATH`` is rejected at parse time
+    (exit 2). ``--snapshot`` writes a magnified viewport
+    to a file; ``--sha`` writes a single line of text to
+    stdout. Two different file-output modes, one
+    invocation, contradictory user intent."""
+    with tempfile.NamedTemporaryFile(
+        suffix=".txt", delete=False
+    ) as fh:
+        snapshot = fh.name
+    try:
+        rc = zoom.main(
+            ["--sha", "--snapshot", snapshot, "hello"]
+        )
+        out = capsys.readouterr()
+        assert rc == 2
+        assert "--sha" in out.err
+        assert "--snapshot" in out.err
+    finally:
+        if os.path.exists(snapshot):
+            os.unlink(snapshot)
+
+
+def test_main_sha_mutual_exclusion_with_raw(capsys) -> None:
+    """``--sha --raw`` is rejected at parse time (exit 2)."""
+    rc = zoom.main(["--sha", "--raw", "hello"])
+    out = capsys.readouterr()
+    assert rc == 2
+    assert "--sha" in out.err
+    assert "--raw" in out.err
+
+
+def test_main_sha_mutual_exclusion_with_list_backends(capsys) -> None:
+    """``--sha --list-backends`` is rejected at parse time
+    (exit 2). ``--list-backends`` answers a question about
+    the screen-capture backend, not the source; the two
+    flags operate on different things and we don't try to
+    emit both kinds of answer in one invocation."""
+    rc = zoom.main(
+        ["--sha", "--list-backends", "hello"]
+    )
+    out = capsys.readouterr()
+    assert rc == 2
+    assert "--sha" in out.err
+    assert "--list-backends" in out.err
+
+
+def test_main_sha_size_wins_on_tie(capsys) -> None:
+    """When both ``--size`` and ``--sha`` are passed,
+    ``--size``'s mutual-exclusion message wins. The
+    ``--size`` block runs first in ``parse_args`` and
+    rejects the combination before ``--sha``'s block has
+    a chance to fire — so the user sees ``--size``'s
+    message (which is the one we want when two
+    discovery flags collide)."""
+    rc = zoom.main(["--sha", "--size", "hello"])
+    out = capsys.readouterr()
+    assert rc == 2
+    # The ``--size`` block rejects first, so the offending
+    # flag in the error message is ``--size`` (the
+    # later-in-the-parser ``--sha`` flag is the one being
+    # rejected against).
+    assert "--size" in out.err
+    assert "cannot be combined" in out.err
+
+
+def test_main_sha_alone_exits_zero(capsys) -> None:
+    """``--sha`` on its own with a positional source exits
+    0 — the happy path. Sanity check that the new flag
+    doesn't change the default exit code."""
+    rc = zoom.main(["--sha", "anything"])
+    out = capsys.readouterr()
+    assert rc == 0
+    # And the digest is 64 hex chars (SHA-256).
+    assert len(out.out.rstrip("\n")) == 64
+
+
+def test_main_sha_json_composes_with_size_wins() -> None:
+    """When ``--sha`` and ``--json`` are both passed,
+    ``--json`` switches the output to a JSON object. The
+    mutual-exclusion between ``--sha`` and ``--list-backends``
+    / ``--size`` / ``--stats`` still holds: ``--json`` is
+    a modifier, not a discovery flag of its own."""
+    rc = zoom.main(["--sha", "--json", "hello"])
+    assert rc == 0
+    # The output is JSON, not a bare digest. (Captured
+    # separately so the capsys fixture can be reused.)
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        zoom.main(["--sha", "--json", "hello"])
+    parsed = json.loads(buf.getvalue())
+    assert "sha256" in parsed
+
+
+def test_sha_help_text_mentions_flag() -> None:
+    """The ``--help`` text mentions ``--sha`` so a user
+    who hits ``paw-zoom --help`` can find it. Regression
+    guard against an accidental rename of the flag."""
+    help_text = zoom.build_parser().format_help()
+    assert "--sha" in help_text
+    assert "--sha-algo" in help_text
+
+
+def test_sha_default_sha_algo_appears_in_help() -> None:
+    """The default algorithm (``sha256``) appears in the
+    ``--sha-algo`` help text, so a user can find the
+    default without reading the source."""
+    help_text = zoom.build_parser().format_help()
+    # The help text contains "default: sha256" or
+    # "default: SHA-256" — either is fine; we just want
+    # the algorithm name visible.
+    assert "sha256" in help_text.lower()

@@ -1976,3 +1976,137 @@ a fourth sound pack (still needs a user request), the shared
 deferred unless someone asks), or the screen-magnifier overlay
 UX (hotkeys, exit-on-key, transparent render — still a 2-3
 tick project).
+
+## 2026-09-20 — `paw-zoom --sha` ships: source-fingerprint discovery
+
+The previous tick's "next tick" line offered three
+directions (a new sound pack, a shared `to_json()` /
+describe helper, or the screen-magnifier overlay UX). The
+sound pack needs a user request; the helper is a refactor
+(deferred); the overlay is multi-tick. None of those is a
+small bounded *behaviour* change. So I picked a fourth
+concrete sibling for the discovery family: `--sha`.
+
+- **What it is.** `paw-zoom --sha` prints a stable hex
+  digest of the source (default: SHA-256, 64 lowercase hex
+  chars) and exits 0 without rendering or capturing
+  anything. The source is resolved exactly the way it
+  would be for a render (positional → `--file` → stdin →
+  `--screen` with `--backend` / `--region` /
+  `--fake-grid` for screen capture), then hashed as UTF-8.
+
+  Use case: scripts that want to skip work when the input
+  hasn't moved. Capture the digest once, compare against a
+  re-computed digest later, branch on the result:
+
+      last=$(paw-zoom --sha --file /var/log/syslog)
+      sleep 60
+      now=$(paw-zoom --sha --file /var/log/syslog)
+      [ "$last" = "$now" ] && exit 0   # nothing new
+
+  The digest reflects the literal content; the file path
+  doesn't appear in the hash, so two `diff`-equivalent
+  files (e.g. one re-saved from a text editor) hash the
+  same.
+
+- **Algorithm pluggability.** A new `--sha-algo NAME` flag
+  picks the digest family. Any algorithm accepted by
+  Python's `hashlib` works: `md5` (32 hex), `sha1` (40),
+  `sha256` (64, the default), `sha512` (128), `blake2b`,
+  `blake2s`, etc. An unknown name is caught at parse
+  time, not at render time — a typo
+  (`--sha-algo blake2x`) exits 2 with a friendly
+  stderr message naming the rejected algorithm. The
+  default algorithm is exposed as
+  `whisperpaw.zoom.DEFAULT_SHA_ALGORITHM = "sha256"` so
+  the help text, the JSON `"algorithm"` key, and the
+  underlying `hashlib` call all read the same constant —
+  changing it is a one-line edit instead of three.
+
+- **JSON output.** `--json` composes with `--sha` →
+  `{"algorithm": "sha256", "sha256": "..."}` (single-line,
+  sorted keys, no ASCII escaping). The digest key
+  reflects the algorithm, so a `--sha-algo sha1` digest
+  comes out keyed `"sha1"` — a downstream consumer can
+  branch on family without re-reading the `algorithm`
+  field. The `algorithm` key always matches
+  `--sha-algo`'s value, so the JSON object is
+  self-describing.
+
+- **Mutual exclusion.** `--sha` is a discovery flag in
+  the same family as `--size` / `--stats` / `--info` /
+  `--list-backends`: each one exits 0 with a different
+  shape of answer, and we don't try to emit more than
+  one of them per invocation. The full set of
+  contradictions (`--sha --size`, `--sha --stats`,
+  `--sha --info`, `--sha --live`, `--sha --follow`,
+  `--sha --max-frames`, `--sha --snapshot`, `--sha
+  --raw`, `--sha --list-backends`) is rejected at parse
+  time (exit 2) with a clear message naming both flags.
+  The order is the same one `--size` and `--stats` use:
+  `--size`'s block runs first, so when both `--size` and
+  `--sha` would fire, the user sees `--size`'s
+  contradiction message (the "two discovery flags
+  collide" diagnostic).
+
+- **Pure-stdlib.** `hashlib` is in the stdlib, so no
+  new third-party deps. The helper lives in
+  `whisperpaw/zoom.py` next to `_source_size` and
+  `_source_stats` so the three text-side discovery
+  helpers sit side-by-side and the conventions
+  (trailing-newline drop, code-point units, sorted JSON
+  keys) stay consistent.
+
+- **Tests.** 43 new tests in `tests/test_zoom.py`:
+  - 7 `_source_sha` low-level tests (empty source /
+    known-value pin / UTF-8 multibyte (CJK) /
+    determinism / algorithm-override across md5/sha1/
+    sha256/sha512 / unknown-algorithm raises ValueError /
+    default-is-sha256).
+  - 4 `_sha_to_text` / `_sha_to_json` tests (format /
+    round-trip / algorithm-key-reflects-input /
+    key-sort / ensure-ascii).
+  - 4 `parse_args` tests (default off / flag on /
+    `--sha-algo` override / unknown algorithm is exit-2).
+  - 28 `main()` end-to-end tests (positional / `--file`
+    / `--file` missing / `--screen` fake / `--screen`
+    fake `--json` / `--screen` x11-headless / no-source
+    / 8 mutual-exclusion rejections including the
+    `--size`-wins-on-tie precedence / `--sha-algo md5`
+    / `--sha-algo sha1 --json` / avalanche-on-one-
+    char-change / empty source via `--file` /
+    `--json` composes / help-text mentions flag /
+    default algo appears in help / `no text` exit-2 /
+    `--screen` x11 headless exit-1).
+
+- **Total: 660/660 green** (43 new + 617 existing).
+  Pure stdlib, no new pip deps, no telemetry, no
+  network.
+
+- **Bookkeeping.** Regenerated all four static shell-
+  completion files (`completions/whisperpaw.{bash,zsh,
+  fish,nu}`) so `--sha` and `--sha-algo` show up in Tab
+  completion for every shell. The byte-identity test in
+  `tests/test_completions.py` caught the drift and
+  forced the regen, as it has for every prior tick.
+  The existing `--json`-without-discovery tests in
+  `test_screen.py` and `test_zoom.py` were updated to
+  expect the new `--json requires --list-backends,
+  --info, --size, --stats, or --sha` message — the
+  message is the contract, the tests are pinned to it,
+  and a future addition of a sixth discovery flag is
+  the right time to extend the message and the
+  assertions together.
+
+- **Next tick.** With `--sha` shipped, the discovery
+  surface is now `--list-backends` (what backends) /
+  `--info` (what setup) / `--size` (how big) / `--stats`
+  (what's in it) / `--sha` (did it change). The five
+  answers together cover the questions a script would
+  reasonably ask before deciding to magnify, render, or
+  skip. Natural follow-ups: a new sound pack (still
+  needs a user request), the shared `to_json()` /
+  describe helper (a refactor, deferred unless someone
+  asks), or the screen-magnifier overlay UX (hotkeys,
+  exit-on-key, transparent render — still a 2-3 tick
+  project).

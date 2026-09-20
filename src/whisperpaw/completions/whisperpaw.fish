@@ -56,6 +56,8 @@ complete -c paw-zoom -l max-frames -d 'Cap --live at N loop iterations (default:
 complete -c paw-zoom -l raw -d 'Dump the source (text or screen) to stdout as plain text, with no magnification…'
 complete -c paw-zoom -l size -d 'Print the source dimensions (rows x cols, in code points) and exit 0 without re…'
 complete -c paw-zoom -l stats -d 'Print per-source statistics (chars, lines, non-blank lines, max line width, mea…'
+complete -c paw-zoom -l sha -d 'Print a stable hex digest of the source (default: SHA-256, 64 lowercase hex cha…'
+complete -c paw-zoom -l sha-algo -d 'Hash algorithm for --sha (default: sha256).'
 complete -c paw-zoom -l screen -d 'Capture a rectangular region of the visual screen and magnify it, instead of ma…'
 complete -c paw-zoom -l region -d 'Screen rectangle to capture when --screen is set.'
 complete -c paw-zoom -l backend -d 'Screen-capture backend to use when --screen is set (default: auto — picks the f…'

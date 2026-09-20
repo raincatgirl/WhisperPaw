@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
 import json
 import os
 import sys
@@ -483,6 +484,85 @@ def _stats_to_json(stats: SourceStats) -> str:
             "mean_line_width": mean_w,
             "non_blank_lines": non_blank,
         },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+
+
+#: Algorithm used by ``paw-zoom --sha``. Centralised so the help
+#: text, the JSON key, and the underlying :mod:`hashlib` call all
+#: agree (changing it would be a one-line edit instead of a
+#: three-line edit in three different sections of the file).
+DEFAULT_SHA_ALGORITHM = "sha256"
+
+
+def _source_sha(source: str, *, algorithm: str = DEFAULT_SHA_ALGORITHM) -> str:
+    """Return a stable hex digest of ``source``.
+
+    The "did the source change?" discovery primitive. Useful in
+    scripts that want to skip work when the input hasn't moved:
+    capture the digest once, compare against a re-computed digest
+    later, branch on the result. The default algorithm is
+    SHA-256 (64 hex chars, collision-resistant enough that two
+    distinct log files will always produce distinct digests in
+    practice). Other algorithms accepted by :mod:`hashlib`
+    (``"sha1"``, ``"sha512"``, ``"md5"``) are reachable via
+    ``--sha-algo`` so a user who already has a digest-comparison
+    pipeline keyed on a specific algorithm can plug in.
+
+    Conventions:
+
+    * The source is encoded as UTF-8 before being hashed, so a
+      multi-byte CJK source produces the same digest the
+      renderer would see. (Python ``str`` would fail outright
+      on :func:`hashlib.sha256`.update` — the encoding is not
+      a stylistic choice, it's a hard requirement.)
+    * The hex digest is lowercase (matches the
+      :func:`hashlib` default and most other tooling).
+    * No length limit on the source — :mod:`hashlib` streams
+      arbitrarily long input, so a 1 GB log file hashes in
+      constant memory.
+
+    Raises :class:`ValueError` for an unsupported ``algorithm``
+    name so the caller gets a clear error instead of the
+    generic :class:`hashlib`'s ``ValueError: unsupported hash
+    type`` traceback.
+    """
+    try:
+        digest = hashlib.new(algorithm)
+    except ValueError as exc:
+        raise ValueError(
+            f"unsupported hash algorithm {algorithm!r} "
+            f"(supported: sha1, sha256, sha512, md5, ...)"
+        ) from exc
+    digest.update(source.encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _sha_to_text(digest: str) -> str:
+    """Render a hex digest as a single line.
+
+    Parallel to :func:`_size_to_text` and :func:`_stats_to_text`
+    — single line, no surrounding JSON object, easy to grep
+    and diff. The line ends with ``\\n`` on stdout because
+    :func:`print` always adds one, so a downstream ``diff``
+    sees exactly the bytes ``echo "$digest"`` would produce.
+    """
+    return digest
+
+
+def _sha_to_json(digest: str, *, algorithm: str = DEFAULT_SHA_ALGORITHM) -> str:
+    """Render a hex digest as a single-line parseable JSON object.
+
+    Parallel to :func:`_size_to_json` and :func:`_stats_to_json`
+    — single line, sorted keys, ``ensure_ascii=False``. The
+    ``algorithm`` key is included so a downstream tool knows
+    *which* digest family to expect; without it a SHA-512
+    digest could be silently mistaken for a truncated
+    SHA-256 and matched against the wrong comparison value.
+    """
+    return json.dumps(
+        {algorithm: digest, "algorithm": algorithm},
         sort_keys=True,
         ensure_ascii=False,
     )
@@ -980,6 +1060,43 @@ def build_parser() -> argparse.ArgumentParser:
             "discovery; --stats is the 'counting' discovery)."
         ),
     )
+    parser.add_argument(
+        "--sha",
+        action="store_true",
+        dest="sha",
+        help=(
+            "Print a stable hex digest of the source (default: "
+            "SHA-256, 64 lowercase hex chars) and exit 0 without "
+            "rendering or capturing anything. The source is "
+            "resolved exactly the way it would be for a render "
+            "(positional -> --file -> stdin -> --screen with "
+            "--backend/--region/--fake-grid for screen capture), "
+            "then hashed as UTF-8. Useful in scripts that want to "
+            "skip work when the input hasn't moved: capture the "
+            "digest once, compare against a re-computed digest "
+            "later, branch on the result. Combine with --json for "
+            "a single-line parseable object ({'algorithm': "
+            "'sha256', 'sha256': '...'}). Pick the algorithm with "
+            "--sha-algo (sha1 / sha256 / sha512 / md5). Mutually "
+            "exclusive with --size, --stats, --info, --live, "
+            "--follow, --max-frames, --snapshot, --raw, and "
+            "--list-backends (all of them exist to drive a "
+            "render or a different discovery; --sha is the "
+            "'fingerprint' discovery)."
+        ),
+    )
+    parser.add_argument(
+        "--sha-algo",
+        default=DEFAULT_SHA_ALGORITHM,
+        dest="sha_algo",
+        metavar="NAME",
+        help=(
+            f"Hash algorithm for --sha (default: {DEFAULT_SHA_ALGORITHM}). "
+            "Any algorithm accepted by Python's hashlib is supported "
+            "(sha1, sha256, sha512, md5, ...). Has no effect without "
+            "--sha. An unknown name is a usage error at parse time."
+        ),
+    )
     # v0.2: screen-capture flags. The group lives behind
     # ``add_screen_args`` so the parser stays readable.
     _screen.add_screen_args(parser)
@@ -1114,6 +1231,55 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     file=sys.stderr,
                 )
                 raise SystemExit(2)
+    # --sha is the *fingerprint* discovery — the stable-hash
+    # companion of --size / --stats. It runs through the same
+    # source-resolution block they do (so the source can be a
+    # text arg, --file, stdin, or a --screen capture) and
+    # short-circuits BEFORE the render / --raw block, so it
+    # contradicts the same render-driving flags --size and
+    # --stats do, plus the other discovery flags (--size,
+    # --stats, --info, --list-backends) for the same reason
+    # they do: each one is a different kind of discovery, and
+    # we don't want to emit more than one of them per
+    # invocation. We run this check *after* the --size and
+    # --stats blocks above so their mutual-exclusion messages
+    # win when more than one discovery flag would fire (the
+    # contradiction between two discovery flags is the more
+    # useful diagnostic). --sha-algo alone is fine (it just
+    # sets the algorithm for the next --sha invocation the
+    # user might add); we only reject the combination when
+    # --sha is set.
+    if args.sha:
+        for flag, value in (
+            ("--size", args.size),
+            ("--stats", args.stats),
+            ("--info", args.info),
+            ("--live", args.live),
+            ("--follow", args.follow),
+            ("--max-frames", args.max_frames),
+            ("--snapshot", args.snapshot),
+            ("--raw", args.raw),
+            ("--list-backends", args.list_backends),
+        ):
+            if value:
+                print(
+                    f"paw-zoom: --sha cannot be combined with {flag} "
+                    f"(--sha is a metadata-only mode that exits "
+                    f"before any render or other discovery)",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
+        # Validate the algorithm eagerly so a typo (e.g.
+        # ``--sha-algo SHA-256`` with the upper-case name) is
+        # caught at parse time with a friendly exit-2 message
+        # instead of crashing the render path with a generic
+        # ``hashlib`` ValueError. We use the same helper the
+        # runtime path uses so the two cannot drift.
+        try:
+            _source_sha("", algorithm=args.sha_algo)
+        except ValueError as exc:
+            print(f"paw-zoom: --sha-algo: {exc}", file=sys.stderr)
+            raise SystemExit(2)
     if args.live and not args.file and not args.screen:
         print(
             "paw-zoom: --live requires --file PATH or --screen "
@@ -1204,15 +1370,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     file=sys.stderr,
                 )
                 raise SystemExit(2)
-    # --json only pairs with --list-backends, --info, --size, or
-    # --stats. Anything else is ambiguous — an empty JSON object
-    # would be a worse failure mode than a clear stderr message.
+    # --json only pairs with --list-backends, --info, --size,
+    # --stats, or --sha. Anything else is ambiguous — an empty
+    # JSON object would be a worse failure mode than a clear
+    # stderr message.
     if args.as_json and not (
-        args.list_backends or args.info or args.size or args.stats
+        args.list_backends or args.info or args.size or args.stats or args.sha
     ):
         print(
             "paw-zoom: --json requires --list-backends, --info, "
-            "--size, or --stats",
+            "--size, --stats, or --sha",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -1356,6 +1523,29 @@ def main(argv: list[str] | None = None) -> int:
             print(_stats_to_json(stats))
         else:
             print(_stats_to_text(stats))
+        return 0
+
+    # v0.2.4: --sha is the *fingerprint* discovery — the
+    # stable-hash companion of --size / --stats. --size answers
+    # "how big is the source as a rectangle?"; --stats answers
+    # "what is in the source?"; --sha answers "is this the
+    # same source I saw last time?". It runs at the same point
+    # in the pipeline as --size and --stats (after source
+    # resolution, before the render / --raw block) so the
+    # source it hashes is the source the renderer would see,
+    # and a user can pipe the same input through any of the
+    # three flags without surprises. Mutual-exclusion is
+    # enforced in parse_args() — reaching this branch with
+    # --sha means the user asked for exactly one thing. The
+    # algorithm is validated at parse time too, so a typo
+    # (e.g. ``--sha-algo SHA-256`` with the upper-case name)
+    # never reaches this line.
+    if args.sha:
+        digest = _source_sha(source, algorithm=args.sha_algo)
+        if args.as_json:
+            print(_sha_to_json(digest, algorithm=args.sha_algo))
+        else:
+            print(_sha_to_text(digest))
         return 0
 
     if args.raw:

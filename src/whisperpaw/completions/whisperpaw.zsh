@@ -74,6 +74,8 @@ _paw_zoom() {
     '--raw[Dump the source (text or screen) to stdout as plain text, with no magnification…]' \
     '--size[Print the source dimensions (rows x cols, in code points) and exit 0 without re…]' \
     '--stats[Print per-source statistics (chars, lines, non-blank lines, max line width, mea…]' \
+    '--sha[Print a stable hex digest of the source (default: SHA-256, 64 lowercase hex cha…]' \
+    '--sha-algo[Hash algorithm for --sha (default: sha256).]' \
     '--screen[Capture a rectangular region of the visual screen and magnify it, instead of ma…]' \
     '--region[Screen rectangle to capture when --screen is set.]' \
     '--backend[Screen-capture backend to use when --screen is set (default: auto — picks the f…]' \

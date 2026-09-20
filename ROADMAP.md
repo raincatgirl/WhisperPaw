@@ -27,7 +27,7 @@ This document is the **single source of truth** for what WhisperPaw will be and 
 | `paw-read`  | ✅ shipped | Read text aloud (stdin / file / clipboard). |
 | `paw-watch` | ✅ shipped | Tail a command and speak new lines. |
 | `paw-complete` | ✅ shipped | Print shell completions (bash / zsh / fish / nushell) for every shipped tool, derived live from each tool's argparse parser. |
-| `paw-zoom`  | ✅ shipped (v0.2) | Magnify a rectangular region of text or of the **screen** (v0.2). v0.1 was an ASCII text-viewport POC; v0.2 adds a `ScreenCapture` adapter protocol, a `FakeScreen` reference implementation, and CLI flags (`--screen`, `--region X,Y,W,H`, `--backend {auto,fake,x11,win32,quartz}`, `--fake-grid`, `--list-backends`, `--info`, `--size`, `--stats`, `--json`). The OS-specific adapters (X11 / Win32 / **Quartz**) ship as real implementations on their respective platforms; the data shape and the rest of the pipeline are real today. |
+| `paw-zoom`  | ✅ shipped (v0.2) | Magnify a rectangular region of text or of the **screen** (v0.2). v0.1 was an ASCII text-viewport POC; v0.2 adds a `ScreenCapture` adapter protocol, a `FakeScreen` reference implementation, and CLI flags (`--screen`, `--region X,Y,W,H`, `--backend {auto,fake,x11,win32,quartz}`, `--fake-grid`, `--list-backends`, `--info`, `--size`, `--stats`, `--sha`, `--sha-algo`, `--json`). The OS-specific adapters (X11 / Win32 / **Quartz**) ship as real implementations on their respective platforms; the data shape and the rest of the pipeline are real today. |
 
 Legend: 🐣 planned · 🛠 in progress · ✅ shipped · 🐛 buggy
 
@@ -206,7 +206,7 @@ CLI: ``paw-zoom [TEXT] [--file PATH] [--rows N] [--cols N]
 [--live] [--interval SECS] [--follow] [--max-frames N] [--raw]
 [--screen] [--region X,Y,W,H] [--backend {auto,fake,x11,win32,quartz}]
 [--fake-grid TEXT] [--list-backends] [--info] [--size]
-[--stats] [--json]``.
+[--stats] [--sha] [--sha-algo NAME] [--json]``.
 
 Exit codes: 0 ok, 1 ``--file`` not found, 2 usage / no source /
 invalid args.
@@ -325,6 +325,81 @@ deliberately diverges from :func:`whisperpaw.zoom._source_size`'s
 different questions. ``chars`` and ``max_line_width`` are
 measured in code points, not bytes, so a multi-byte CJK
 source is counted the same way the renderer counts it.
+
+``--sha`` is the *fingerprint* discovery — the stable-hash
+companion of ``--size`` and ``--stats``. ``--size`` answers
+"how big is the source as a rectangle?"; ``--stats`` answers
+"what is in the source?"; ``--sha`` answers "is this the
+same source I saw last time?". Useful in scripts that want
+to skip work when the input hasn't moved: capture the digest
+once, compare against a re-computed digest later, branch on
+the result. The CLI flag works for all three source-
+resolution paths (positional, ``--file``, ``--screen`` with
+``--backend`` / ``--region`` / ``--fake-grid``), short-
+circuits at the same point ``--size`` and ``--stats`` do
+(after source resolution, before the render / ``--raw``
+block), and is mutually exclusive with ``--size`` / ``--stats``
+/ ``--info`` / ``--live`` / ``--follow`` / ``--max-frames`` /
+``--snapshot`` / ``--raw`` / ``--list-backends`` (exit 2 with
+a clear stderr message). The mutual-exclusion check is
+ordered AFTER ``--size``'s and ``--stats``'s so the
+contradiction message from the earlier-discovered flag wins
+when more than one discovery flag would fire.
+
+* ``--json`` composes with ``--sha`` →
+  ``{"algorithm": "sha256", "sha256": "..."}`` (single-line,
+  sorted keys, no ASCII escaping). The ``algorithm`` key
+  reflects whatever ``--sha-algo`` was set to (or
+  ``"sha256"`` by default), so a downstream tool can tell
+  which digest family the value is in without re-reading
+  the algorithm field.
+
+* ``--sha-algo NAME`` picks the digest family. Defaults to
+  ``"sha256"`` (64 lowercase hex chars, collision-resistant
+  enough that two distinct log files will always produce
+  distinct digests in practice). Any algorithm accepted by
+  Python's :mod:`hashlib` is supported (``md5`` / ``sha1`` /
+  ``sha256`` / ``sha512`` / ``blake2b`` / ...). An unknown
+  name is a usage error at parse time (exit 2) with a
+  friendly stderr message that names the rejected
+  algorithm — a typo (``"blake2x"``) is caught before any
+  render code runs.
+
+The derivation lives in three pure functions in
+:mod:`whisperpaw.zoom`:
+
+* :func:`whisperpaw.zoom._source_sha(source, *, algorithm)`
+  — the SHA helper. Encodes the source as UTF-8 before
+  hashing (a hard requirement of :mod:`hashlib` on a Python
+  ``str``; not a stylistic choice), then returns the
+  lowercase hex digest. The ``algorithm`` keyword is
+  injectable so tests don't have to monkey-patch the
+  module-level default. The default algorithm is exposed
+  as :data:`whisperpaw.zoom.DEFAULT_SHA_ALGORITHM` so the
+  CLI help text, the JSON ``"algorithm"`` key, and the
+  helper all read the same constant — a change propagates
+  to all three places.
+* :func:`whisperpaw.zoom._sha_to_text(digest)` — the
+  fixed ``"hex"`` rendering ``--sha`` prints (a single
+  line, no surrounding JSON object, easy to grep / diff).
+* :func:`whisperpaw.zoom._sha_to_json(digest, *,
+  algorithm)` — the single-line parseable JSON object
+  ``--sha --json`` prints. The ``"algorithm"`` key
+  matches the value of ``--sha-algo`` so a downstream
+  consumer can branch on digest family without parsing
+  the digest itself.
+
+The source is encoded as UTF-8 before being hashed so a
+multi-byte CJK source produces the same digest the
+renderer would see. The hex digest is lowercase (matches
+the :mod:`hashlib` default and most other tooling). No
+length limit on the source — :mod:`hashlib` streams
+arbitrarily long input, so a 1 GB log file hashes in
+constant memory. The helper raises :class:`ValueError`
+for an unsupported ``algorithm`` name so the caller gets
+a clear error instead of the generic
+``ValueError: unsupported hash type`` traceback that
+:func:`hashlib.new` would emit.
 
 ### `paw-zoom` v0.2 (screen-capture adapter skeleton)
 
@@ -535,6 +610,7 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-19 — paw-zoom: add `--info` flag (screen-capture diagnostic). New public helpers in `whisperpaw._screen`: `describe_capture(backend, region, fake_grid, get_capture_fn)` returns a 5-key metadata dict (backend / available / adapter / screen_size / region); `describe_to_text(info)` renders it as 5 fixed-order `key: value` lines; `describe_to_json(info)` emits the same shape as a single-line parseable JSON object. The CLI flag --info requires --screen (a usage error otherwise) and is mutually exclusive with --live / --follow / --max-frames / --snapshot / --raw (exit 2). --info --json combines them; --json is also now valid with --list-backends. The flag short-circuits in main() before the source-resolution block so a missing OS adapter is reported as `available: no` rather than a fatal exit-1. 27 new tests in test_screen.py (describe_capture fake / unavailable / factory-ValueError / OS-backend / explicit region / "full" / out-of-range clamp / adapter screen_size failure / region-parsing error; describe_to_text format / dash placeholders; describe_to_json round-trip / None preservation; main --info requires --screen / text mode / JSON mode / unavailable / explicit region / 3 mutual-exclusion rejections / JSON-without-discovery / malformed fake-grid / help text; parse_args default + flag). 540/540 green. Static completion files regenerated.
 - 2026-09-19 — paw-zoom: add `--size` flag (text-source dimensions discovery). The text-side analog of --info: --info answers "what screen-capture setup would I get?"; --size answers "how big is the source?". New public helpers in `whisperpaw.zoom`: `SourceSize` named tuple alias, `_source_size(source) -> (rows, max_cols)` (code-point units; drops a single trailing empty line if the source ends in `\n` — same convention as `_tail_offset` and `_extract_region`; empty source returns `(1, 0)` — the natural shape for "window with nothing in it"), `_size_to_text(size)` (fixed `R x C` format), `_size_to_json(size)` (single-line `{"cols": C, "rows": R}` with sorted keys + `ensure_ascii=False`). The CLI flag works for all three source-resolution paths (positional, --file, --screen with --backend/--region/--fake-grid), short-circuits AFTER source resolution but BEFORE the render / --raw block, and is mutually exclusive with --info / --live / --follow / --max-frames / --snapshot / --raw / --list-backends (exit 2 with a clear stderr message). --json composes with --size → `{"rows": N, "cols": M}`. The mutual-exclusion check is ordered BEFORE `--live requires --file/--screen` so the contradiction message wins when both would fire. 37 new tests in test_zoom.py (8 _source_size low-level tests covering basic / single-line / empty / whitespace / trailing-newline / internal-blank-line / unicode / max-col-picks-longest; 3 _size_to_text / _size_to_json tests covering format / zero-cols / round-trip / key sort / ensure_ascii; 2 parse_args tests covering default off + flagged; 16 main() end-to-end tests covering positional text / multiline / JSON / --file / --file-missing / --screen / --screen --json / --screen --region / unsupported-backend / no-source / 6 mutual-exclusion rejections with one snapshot-write guard / JSON-without-discovery / malformed-fake-grid / viewport-flag-ignoring / help-text / short-circuits-before-render). 577/577 green. Static completion files regenerated so --size shows up in Tab completion.
 - 2026-09-20 — paw-zoom: add `--stats` flag (per-source statistics discovery). The counting companion of --size: --size answers "how big is the source as a rectangle?" (rows × cols); --stats answers "what is in the source?" (chars / lines / non-blank lines / max line width / mean line width). New public helpers in `whisperpaw.zoom`: `SourceStats` named tuple alias, `_source_stats(source) -> (chars, lines, non_blank_lines, max_line_width, mean_line_width)` (code-point units for `chars` / `max_line_width`; drops a single trailing empty line if the source ends in `\n` — same convention as `_source_size` and `_tail_offset`; empty source returns all zeros — the "nothing to count" answer, which deliberately diverges from `_source_size`'s `(1, 0)` on the same input because the two flags answer different questions), `_stats_to_text(stats)` (5-line fixed `key: value` block, `mean_line_width` rendered as a stable 2-decimal float), `_stats_to_json(stats)` (single-line `{chars, lines, max_line_width, mean_line_width, non_blank_lines}` with sorted keys + `ensure_ascii=False`; `mean_line_width` is a JSON number not a string). The CLI flag works for all three source-resolution paths (positional, --file, --screen with --backend/--region/--fake-grid), short-circuits at the same point --size does (after source resolution, before the render / --raw block), and is mutually exclusive with --size / --info / --live / --follow / --max-frames / --snapshot / --raw / --list-backends (exit 2 with a clear stderr message). --json composes with --stats → `{"chars": N, "lines": M, "max_line_width": W, "mean_line_width": X.XX, "non_blank_lines": K}`. The mutual-exclusion check is ordered AFTER --size's so --size's contradiction message wins when both --size and --stats would fire. 40 new tests in test_zoom.py (8 _source_stats low-level tests covering basic / single-line / empty / whitespace / trailing-newline / internal-blank-line / mixed / unicode / mean-rounding; 5 _stats_to_text / _stats_to_json tests covering format / zero-values / 2-decimal-mean / round-trip / key-sort / JSON-number; 2 parse_args tests covering default-off + flagged; 25 main() end-to-end tests covering positional text / multiline / JSON / --file / --file-missing / --screen fake / --screen fake --json / unsupported-backend / no-source / 7 mutual-exclusion rejections including a snapshot-write guard / JSON-without-discovery / malformed-fake-grid / viewport-flag-ignoring / help-text / short-circuits-before-render / consistency-with-size). 617/617 green. Static completion files regenerated so --stats shows up in Tab completion. The existing --json-requires-discovery tests in test_screen.py and test_zoom.py were updated to expect the new `--json requires --list-backends, --info, --size, or --stats` message.
+- 2026-09-20 — paw-zoom: add `--sha` flag (source-fingerprint discovery). The stable-hash companion of --size and --stats: --size answers "how big is the source as a rectangle?"; --stats answers "what is in the source?"; --sha answers "is this the same source I saw last time?". New public helpers in `whisperpaw.zoom`: `DEFAULT_SHA_ALGORITHM = "sha256"` constant (single source of truth for the help text, the JSON key, and the underlying `hashlib` call), `_source_sha(source, *, algorithm=DEFAULT_SHA_ALGORITHM)` (UTF-8-encodes the source, hashes it, returns the lowercase hex digest; raises `ValueError` on an unsupported algorithm so the parse_args() path can re-emit it as a clean exit-2), `_sha_to_text(digest)` (single-line bare-digest rendering), `_sha_to_json(digest, *, algorithm)` (single-line `{"algorithm": "sha256", "sha256": "..."}` with sorted keys + `ensure_ascii=False`; the digest key reflects the algorithm so a SHA-1 digest is keyed `"sha1"` and a downstream consumer can branch on family without re-reading the `algorithm` field). New CLI flag `--sha-algo NAME` picks the digest family (any `hashlib` algorithm — md5 / sha1 / sha256 / sha512 / blake2b / ...; an unknown name is caught at parse time, not at render time). The CLI flag works for all three source-resolution paths (positional, --file, --screen with --backend/--region/--fake-grid), short-circuits at the same point --size and --stats do (after source resolution, before the render / --raw block), and is mutually exclusive with --size / --stats / --info / --live / --follow / --max-frames / --snapshot / --raw / --list-backends (exit 2 with a clear stderr message naming both flags). The mutual-exclusion check is ordered AFTER --size's and --stats's so the contradiction message from the earlier-discovered flag wins when more than one discovery flag would fire. --json composes with --sha → `{"algorithm": "sha256", "sha256": "..."}`. 43 new tests in test_zoom.py (7 _source_sha low-level tests covering empty / known-value / UTF-8 multibyte / determinism / algorithm-override / unknown-raises / default-is-sha256; 4 _sha_to_text / _sha_to_json tests covering format / round-trip / algorithm-key-reflects-input / key-sort / ensure-ascii; 4 parse_args tests covering default-off / flag-on / --sha-algo-override / --sha-algo-unknown-is-usage-error; 19 main() end-to-end tests covering positional / --file / --file-missing / --screen fake / --screen fake --json / --screen x11-headless / no-source / 8 mutual-exclusion rejections including --size-wins-on-tie / --sha-algo-md5 / --sha-algo-sha1 --json / avalanche-on-one-char-change / empty-source / --json-composes / help-text-mentions-flag / default-algo-appears-in-help). 660/660 green. Static completion files regenerated so --sha and --sha-algo show up in Tab completion.
 <!-- TICK-LOG-END -->
 
 (Updated 2026-09-17: `paw-zoom` v0.2 ships the screen-capture
