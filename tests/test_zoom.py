@@ -3945,4 +3945,347 @@ def test_help_text_mentions_col_ruler() -> None:
     accidental rename of the flag.
     """
     help_text = zoom.build_parser().format_help()
-    assert "--col-ruler" in help_text
+
+# ---------------------------------------------------------------------------
+# --border (render-time frame annotation)
+# ---------------------------------------------------------------------------
+
+
+def test_format_border_basic() -> None:
+    """``_format_border`` wraps a single-line string in a
+    minimal light box. The ``+---+`` top / bottom lines
+    flank a single ``|x|`` row. The helper is width-aware:
+    the box is exactly ``len(line) + 2`` chars wide for a
+    single line.
+    """
+    out = zoom._format_border("abc")
+    assert out == "+---+\n|abc|\n+---+"
+    # sanity: also check the parts
+    lines = out.splitlines()
+    assert lines[0] == "+---+"
+    assert lines[-1] == "+---+"
+    assert lines[1] == "|abc|"
+
+
+def test_format_border_multi_line() -> None:
+    """Multi-line ``rendered`` gets a border on *every*
+    line; the top / bottom ``+---+`` width is the
+    longest line. The output preserves the line count
+    of the input plus 2 (the frame).
+    """
+    out = zoom._format_border("abc\ndef")
+    assert out == "+---+\n|abc|\n|def|\n+---+"
+    lines = out.splitlines()
+    # 2 content + 2 frame = 4 lines.
+    assert len(lines) == 4
+
+
+def test_format_border_empty() -> None:
+    """An empty ``rendered`` is still wrapped — the user
+    asked for a border around an empty viewport, so the
+    output is a 1-cell box (``+\\n| \\n+\\n``). This
+    differs from ``_format_col_ruler``'s empty-case
+    (which is a no-op, because a ruler is a line the
+    user would never want to see alone; a border is a
+    *frame* and an empty frame is a valid frame).
+    """
+    assert zoom._format_border("") == "+\n| \n+\n"
+
+
+def test_format_border_short_line_padded() -> None:
+    """Shorter lines are right-padded with spaces to the
+    box width before the right-hand border is added.
+    The longest line determines the width, so a
+    2-line ``rendered`` of widths 2 and 11 produces a
+    13-wide box (11 + 2 border) with the shorter
+    line space-padded.
+    """
+    out = zoom._format_border("ab\nlonger line")
+    assert out == (
+        "+-----------+\n"
+        "|ab         |\n"
+        "|longer line|\n"
+        "+-----------+"
+    )
+
+
+def test_format_border_trailing_newline_no_phantom_row() -> None:
+    """``str.splitlines()`` drops a single trailing
+    newline, so ``"abc\\n"`` (one content line) does
+    NOT produce a phantom empty ``| |`` row at the
+    bottom — the standard editor convention.
+    """
+    assert zoom._format_border("abc\n") == (
+        "+---+\n|abc|\n+---+"
+    )
+
+
+def test_format_border_unicode_width() -> None:
+    """Unicode code points are counted individually
+    (not by display width). The box width is the
+    count of ``str`` code points, matching the
+    magnified viewport convention everywhere else
+    in the file. A 3-codepoint string gets a 3-cell
+    box (the box width is the longest line, which is
+    3 codepoints here) regardless of whether the
+    codepoints render as narrow or wide.
+    """
+    out = zoom._format_border("🐾🐾🐾")
+    # 3 codepoints (1 codepoint per emoji in this case) +
+    # 2 borders = "+---+" for the top.
+    assert out == "+---+\n|🐾🐾🐾|\n+---+"
+
+
+def test_parse_args_border_default_off() -> None:
+    """``--border`` defaults to ``False`` so a vanilla
+    ``paw-zoom …`` keeps its current output shape —
+    no frame, no behaviour change for users who
+    didn't ask for the annotation.
+    """
+    args = zoom.parse_args(["hello"])
+    assert args.border is False
+
+
+def test_parse_args_border_flag() -> None:
+    """``--border`` is a ``store_true`` flag — passing
+    it once flips the attribute to ``True``.
+    """
+    args = zoom.parse_args(["--border", "hello"])
+    assert args.border is True
+
+
+def test_main_border_renders_with_frame(capsys) -> None:
+    """End-to-end: ``paw-zoom --border …`` emits a
+    magnified viewport wrapped in a light box. With
+    ``--rows 1 --cols 3 --zoom 1`` the source
+    ``"abc"`` is one line, so the box has 5 cells
+    wide and 3 lines tall (top, content, bottom).
+    The default off-by-default behaviour is unchanged
+    for users who don't pass the flag.
+    """
+    rc = zoom.main(
+        [
+            "--rows",
+            "1",
+            "--cols",
+            "3",
+            "--zoom",
+            "1",
+            "--border",
+            "abc",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    lines = out.out.splitlines()
+    # Drop the announcement line.
+    assert lines[0].startswith("🐾 paw-zoom:")
+    assert lines[1:] == [
+        "+---+",
+        "|abc|",
+        "+---+",
+    ]
+
+
+def test_main_border_off_by_default(capsys) -> None:
+    """Without ``--border``, the rendered output
+    is the *unframed* viewport — no ``+---+``
+    anywhere. Confirms the off-by-default
+    behaviour is preserved.
+    """
+    rc = zoom.main(
+        [
+            "--rows",
+            "1",
+            "--cols",
+            "3",
+            "--zoom",
+            "1",
+            "abc",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    # The unflagged render is just the magnified source
+    # repeated for --rows (1 row -> 1 line).
+    lines = out.out.splitlines()
+    assert lines[0].startswith("🐾 paw-zoom:")
+    assert lines[1] == "abc"
+    # And no border characters anywhere in the
+    # unflagged output.
+    assert "+" not in out.out
+    assert "|" not in out.out
+
+
+def test_main_border_quiet_still_emits_frame(capsys) -> None:
+    """``--quiet --border`` still emits the framed
+    viewport. The frame is part of the rendered
+    output, not the announcement line that
+    ``--quiet`` suppresses. (Quiet + border is
+    the natural way to capture a clean framed
+    block into a log without the announcement
+    getting in the way.)
+    """
+    rc = zoom.main(
+        [
+            "--rows",
+            "1",
+            "--cols",
+            "3",
+            "--zoom",
+            "1",
+            "--quiet",
+            "--border",
+            "abc",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    # No announcement line.
+    assert "🐾 paw-zoom" not in out.out
+    # But the frame is there.
+    assert out.out.splitlines() == [
+        "+---+",
+        "|abc|",
+        "+---+",
+    ]
+
+
+def test_main_border_composes_with_line_numbers(capsys) -> None:
+    """``--border`` and ``--line-numbers`` compose:
+    ``--line-numbers`` runs first (so the gutter
+    is on the *inside* of every viewport line),
+    then ``--border`` wraps the guttered viewport
+    in a frame. The frame's width follows the
+    widest line — i.e. it widens to accommodate
+    the gutter.
+    """
+    rc = zoom.main(
+        [
+            "--rows",
+            "1",
+            "--cols",
+            "3",
+            "--zoom",
+            "1",
+            "--line-numbers",
+            "--border",
+            "abc",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    lines = out.out.splitlines()
+    assert lines[0].startswith("🐾 paw-zoom:")
+    # The gutter widens the content to "   1 | abc"
+    # (3-char gutter + " | " = 7 chars; plus 3 chars of
+    # content = 10 chars total), so the box is
+    # "+----------+" (12 chars).
+    assert lines[1:] == [
+        "+----------+",
+        "|   1 │ abc|",
+        "+----------+",
+    ]
+
+
+def test_main_border_composes_with_col_ruler(capsys) -> None:
+    """``--border`` and ``--col-ruler`` compose:
+    ``--col-ruler`` runs first (so the ruler is
+    on the *inside* of the top, above the
+    viewport), then ``--border`` wraps the ruled
+    viewport in a frame. The frame's width
+    follows the widest line — i.e. it widens to
+    accommodate the ruler, and its height grows
+    by 1 to enclose the ruler row.
+    """
+    rc = zoom.main(
+        [
+            "--rows",
+            "1",
+            "--cols",
+            "3",
+            "--zoom",
+            "1",
+            "--col-ruler",
+            "--border",
+            "abc",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    lines = out.out.splitlines()
+    assert lines[0].startswith("🐾 paw-zoom:")
+    # The ruler widens the topmost line to "123"
+    # (3 chars), same as the content; the box is
+    # therefore 5 wide. The frame now has 4 rows:
+    # top, ruler, content, bottom.
+    assert lines[1:] == [
+        "+---+",
+        "|123|",
+        "|abc|",
+        "+---+",
+    ]
+
+
+def test_main_border_discovery_silent(capsys) -> None:
+    """``--border`` is a *render-time* annotation;
+    every discovery flag short-circuits in ``main()``
+    before any render, so a stray ``--border`` on
+    a discovery invocation is silently ignored
+    (no border appears in the discovery output).
+    Same convention as ``--line-numbers`` and
+    ``--col-ruler`` use for the same reason.
+    """
+    rc = zoom.main(["--list-backends", "--border"])
+    out = capsys.readouterr()
+    assert rc == 0
+    # No border in the discovery output.
+    assert "+" not in out.out
+    assert "|" not in out.out
+
+
+def test_main_border_with_snapshot_writes_frame(
+    capsys, tmp_path
+) -> None:
+    """``--border --snapshot PATH`` writes the
+    *framed* viewport to PATH (the frame is part
+    of the rendered output, not a stdout-side
+    decoration). Useful for piping a clean
+    bordered block to a log or a downstream tool.
+    """
+    snap = tmp_path / "frame.txt"
+    rc = zoom.main(
+        [
+            "--rows",
+            "1",
+            "--cols",
+            "3",
+            "--zoom",
+            "1",
+            "--quiet",
+            "--border",
+            "--snapshot",
+            str(snap),
+            "abc",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    # Nothing on stdout when --snapshot is set.
+    assert out.out == ""
+    text = snap.read_text(encoding="utf-8").splitlines()
+    assert text == [
+        "+---+",
+        "|abc|",
+        "+---+",
+    ]
+
+
+def test_help_text_mentions_border() -> None:
+    """``--border`` is in the ``--help`` output so
+    a user who hits ``paw-zoom --help`` can find
+    it. Regression guard against an accidental
+    rename of the flag.
+    """
+    help_text = zoom.build_parser().format_help()
+    assert "--border" in help_text

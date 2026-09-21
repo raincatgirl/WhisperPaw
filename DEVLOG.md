@@ -2445,3 +2445,122 @@ overlay UX (the "wait-for-keypress-then-exit" one-tick
 piece), or the shared `to_json()` / describe helper
 refactor (a refactor across modules, deferred unless
 someone asks).
+
+**2026-09-21 — paw-zoom: ship `--border` flag.**
+
+- **What changed.** Added a new render-time annotation flag
+  to `paw-zoom` that wraps the rendered output in a light
+  ASCII box (`+---+` on top and bottom, `| ... |` on every
+  side). The flag complements `--line-numbers` (gutter on
+  the left) and `--col-ruler` (ruler on top) by adding a
+  *frame* on the outside, so a render with all three looks
+  like a framed "spreadsheet view" of the magnified block.
+
+- **Why.** The render surface already had shape control
+  (`--zoom` / `--rows` / `--cols` / `--offset` / `--col-offset` /
+  `--charset`), live control (`--live` / `--follow` /
+  `--max-frames` / `--max-seconds`), output (`--snapshot` /
+  `--raw` / `--quiet`), and correlation (`--line-numbers` /
+  `--col-ruler`). What was missing was a *frame*: a way to
+  visually separate the magnified block from the surrounding
+  terminal context, so a piped or snapshotted frame is
+  obviously framed when the user scrolls back through the
+  log or opens the snapshot in another tool. A box-drawing
+  border is the standard "this is a block" convention in
+  every editor and terminal multiplexer.
+
+- **What I added.**
+  - **Helper.** `whisperpaw.zoom._format_border` — a pure
+    function that takes any rendered string and wraps it
+    in a `+---+` / `| … |` / `+---+` frame. The frame's
+    width follows the longest existing line (so short
+    lines are right-padded with spaces to the box width
+    before the right-hand border is added), and uses
+    `str.splitlines()` so a single trailing newline doesn't
+    add a phantom `| |` row at the bottom. An empty
+    `rendered` is *still* wrapped (a 1-cell empty frame
+    `+\n| \n+\n` is a valid "draw me a box" answer) — the
+    no-op convention that applies to `_format_col_ruler`
+    and `_format_line_numbers` does not apply to a *frame*.
+    Width is counted in code points, the same convention
+    `_extract_region` and `_magnify` use everywhere else,
+    so a CJK or emoji cell counts as one column regardless
+    of display width.
+  - **CLI flag.** `--border` (a `store_true`
+    `dest="border"`, default off so vanilla `paw-zoom …`
+    keeps its current output shape). The help text is
+    verbose on purpose — it spells out the box shape, the
+    content-hugging width invariant, the composition with
+    `--line-numbers` and `--col-ruler`, the silent-ignore
+    on discovery flags and `--raw`, and the same
+    `--rows`/`--cols`-is-unchanged caveat the other
+    annotations' help text carries.
+  - **Wiring.** The flag is a *render-time* annotation,
+    so it threads through the same three sites
+    `--line-numbers` and `--col-ruler` thread through: the
+    one-shot render in `main()` (after `_format_col_ruler`,
+    before the `--snapshot` write), the text-source tail
+    in `_tail_and_render` (per-frame, after the
+    `frame_cfg` rewrite, applied last so the border sits
+    on the outside), and the screen-capture tail in
+    `_tail_screen_and_render` (per-frame, same position).
+    `--border` runs *after* both `--line-numbers` and
+    `--col-ruler` in all three sites so the border sits
+    cleanly on the outside of every other annotation, not
+    behind a spurious gutter prefix.
+  - **Discovery silent.** Like `--line-numbers` and
+    `--col-ruler`, `--border` is silently ignored on
+    every discovery flag (`--list-backends`, `--info`,
+    `--size`, `--stats`, `--sha`) and on `--raw` — none
+    of them produce magnified output to frame, and
+    silently stripping the flag is the same convention
+    the other annotations use.
+
+- **Tests.** 16 new tests in `tests/test_zoom.py`:
+  - 6 `_format_border` low-level tests (basic / multi-line
+    / empty / short-line-padding / trailing-newline-no-
+    phantom / unicode-codepoint-count).
+  - 2 `parse_args` tests (default-off / flagged).
+  - 7 `main()` end-to-end tests (render-with-frame /
+    off-by-default / quiet-still-emits-frame / composes-
+    with-line-numbers / composes-with-col-ruler /
+    discovery-silent / snapshot-writes-frame).
+  - 1 help-text regression guard (`--border` appears in
+    `format_help()`).
+
+- **Bookkeeping.** Regenerated all four static
+  shell-completion files (`completions/whisperpaw.{bash,
+  zsh,fish,nu}`) so `--border` shows up in Tab completion
+  for every shell. The byte-identity test in
+  `tests/test_completions.py` caught the drift and forced
+  the regen, as it has for every prior tick. The
+  `ROADMAP.md` got a new design section
+  ("`--border` is the *frame-side companion* of
+  `--line-numbers` and `--col-ruler`") and a tick-log
+  entry; the `paw-zoom` CLI signature summary in the
+  design section picked up the new flag.
+
+- **Total: 724/724 green** (16 new + 708 existing). Pure
+  stdlib, no new pip deps, no telemetry, no network.
+  The new helper lives next to `_format_col_ruler` and
+  `_format_line_numbers` in `whisperpaw/zoom.py` so the
+  render-time public surface stays co-located.
+
+**Next tick.** With `--border` shipped, the render surface
+is complete: every magnifier annotation the standard
+editors and screen magnifiers ship (shape control, live
+control, output, correlation, and now framing) is covered.
+The discovery surface is also complete (`--list-backends` /
+`--info` / `--size` / `--stats` / `--sha` / `--border` is
+not a discovery flag, but every other discovery is). The
+next genuinely useful behaviour change is one of:
+(1) a small slice of the screen-magnifier overlay UX
+(the "wait-for-keypress-then-exit" piece, deferred from
+the v0.2 screen-capture tick), (2) a fourth sound pack
+for `paw-sound` (still needs a user request — the
+existing `cat` / `forest` / `rain` packs already span
+the major ambient moods), or (3) the shared `to_json()` /
+describe helper refactor (a refactor across modules,
+deferred unless someone asks). The repo is healthy:
+all four tools shipped, the test suite is green, the
+roadmap is up to date.

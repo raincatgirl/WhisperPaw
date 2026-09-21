@@ -207,7 +207,8 @@ CLI: ``paw-zoom [TEXT] [--file PATH] [--rows N] [--cols N]
 [--max-seconds SECS] [--raw]
 [--screen] [--region X,Y,W,H] [--backend {auto,fake,x11,win32,quartz}]
 [--fake-grid TEXT] [--list-backends] [--info] [--size]
-[--stats] [--sha] [--sha-algo NAME] [--col-ruler] [--json]``.
+[--stats] [--sha] [--sha-algo NAME] [--line-numbers] [--col-ruler]
+[--border] [--json]``.
 
 Exit codes: 0 ok, 1 ``--file`` not found, 2 usage / no source /
 invalid args.
@@ -493,6 +494,70 @@ shift is clamped to ``1`` via the same
 ``row_offset`` path uses, so a stray negative
 ``--col-offset`` never produces a "0 │ ..." prefix.
 
+``--border`` is the *frame-side companion* of
+``--line-numbers`` and ``--col-ruler``: it wraps the
+rendered output in a light ASCII box (``+---+``
+on top and bottom, ``| ... |`` on every side), so
+the magnified block is visually separated from
+the surrounding terminal context — useful when the
+viewport is being piped into a log file or
+captured by a downstream tool that needs a
+"framed" block of text. The natural sibling of the
+existing inner-content annotations: gutter on the
+*inside-left*, ruler on the *inside-top*, border
+on the *outside*.
+
+The border hugs the content: its width matches
+the longest line of the (possibly guttered,
+possibly ruled) rendered output, so a one-line
+viewport and a ten-line viewport both get a
+border that fits. Short lines are right-padded
+with spaces to the box width before the
+right-hand border is added, so the right edge of
+the box is always a single column.
+
+The flag is a *render-time* annotation, so it
+composes with every render-driving flag
+(``--zoom`` / ``--rows`` / ``--cols`` / ``--offset``
+/ ``--col-offset`` / ``--charset`` / ``--line-numbers``
+/ ``--col-ruler`` / ``--live`` / ``--follow`` /
+``--max-frames`` / ``--max-seconds`` / ``--snapshot``)
+and is silently ignored by the discovery flags
+(``--list-backends``, ``--info``, ``--size``,
+``--stats``, ``--sha``) and ``--raw``, which never
+produce magnified output to frame. It also
+composes with ``--line-numbers`` and ``--col-ruler``
+— the border sits *outside* the gutter and the
+ruler — by running LAST in the render pipeline,
+so a render with ``--border --line-numbers
+--col-ruler`` looks like a framed "spreadsheet
+view" of the magnified block: bordered outside,
+guttered on the left, ruled on top, magnified
+text in the middle. The border does not count
+against ``--rows`` or ``--cols``: the magnified
+viewport's vertical and horizontal extents are
+unchanged.
+
+The derivation lives in a pure helper
+:func:`whisperpaw.zoom._format_border` (one
+input, one output, no globals): it splits
+``rendered`` into lines (using ``str.splitlines()``
+so a single trailing newline doesn't add a
+phantom ``| |`` row at the bottom), determines
+the box width from the longest line, and emits
+the top / padded-content / bottom trio. Unlike
+:func:`_format_col_ruler` and
+:func:`_format_line_numbers`, an empty
+``rendered`` is still wrapped — a 1-cell empty
+frame (``+\n| \n+\n``) is a valid "draw me a
+box" answer, and the no-op convention that
+applies to a single-line ruler does not apply to
+a *frame*. Width is counted in code points, the
+same convention :func:`_extract_region` and
+:func:`_magnify` use everywhere else, so a CJK
+or emoji cell counts as one column regardless of
+display width.
+
 ### `paw-zoom` v0.2 (screen-capture adapter skeleton)
 
 v0.2 adds the **screen-capture seam** without yet shipping real
@@ -706,6 +771,7 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-20 — paw-zoom: add `--max-seconds SECS` flag (wall-clock cap on `--live`). The natural companion of `--max-frames`: `--max-frames` caps the loop at N iterations, `--max-seconds` caps it at N wall-clock seconds. Useful for scripts that want "watch the live log for 30s, then exit" without having to estimate the iteration count in advance. Composes with `--max-frames` (whichever cap fires first wins), `--follow`, `--snapshot`, and `--interval` — the same composition matrix the iteration cap has. New public helper `_max_seconds_exceeded(start, max_seconds, now)` (pure, `(now - start) >= max_seconds`, with `max_seconds <= 0` short-circuiting to "no cap") plus a `time_fn` injection point (default `time.monotonic`, immune to NTP slews) on both `_tail_and_render` and `_tail_screen_and_render`. Parse-time validation: a negative value is exit 2 with a clear stderr message; zero (the default) is the "unlimited" sentinel. Has no effect without `--live` — the one-shot render always emits exactly one frame, same convention as `--max-frames`. 13 new tests in test_zoom.py (4 `_max_seconds_exceeded` low-level tests covering zero-means-unlimited / within-window / at-boundary / non-zero-start; 3 `_tail_and_render` integration tests covering the cap actually firing / zero-is-unlimited / composes-with-max-frames via a fake `time_fn`; 3 `parse_args` tests covering default-zero / flagged / negative-is-exit-2; 1 help-text test; 2 `main()` end-to-end tests covering live-with-cap / without-live-is-noop). 673/673 green. Static completion files regenerated (--max-seconds shows up in Tab completion for every shell).
 - 2026-09-20 — paw-zoom: add `--line-numbers` flag. The per-source-row gutter annotation: prefixes each magnified source row with its 1-based row number in a 4-char right-aligned column + ` | ` gutter (same shape as `cat -n` / `nl` / most editors). The first number is `cfg.row_offset + 1`, so `paw-zoom --offset 12 --line-numbers …` produces gutters starting at `13`; the gutter tracks the source's actual line numbers as `--follow` / `--live` re-derive the offset per frame. Useful for correlating a magnified block with its source: "which source line is this magnified row from?" The flag is a *render-time* annotation: it composes with every render-driving flag (--zoom / --rows / --cols / --offset / --col-offset / --charset / --live / --follow / --max-frames / --max-seconds / --snapshot) and is silently ignored by the discovery flags (--list-backends, --info, --size, --stats, --sha) and --raw, which never produce magnified output to annotate. New public helper `_format_line_numbers(rendered, *, zoom, first_source_row, width=4, gutter=" │ ")` is pure: it groups `rendered` into `zoom`-sized chunks (one chunk per source row), prepends `f"{row:>{width}}{gutter}"` to every line in the group, and is `width` / `gutter` overridable for tighter or looser gutters. Empty `rendered` is a no-op (the `--raw` and the no-frame case both rely on this); a non-positive `zoom` falls back to per-line numbering as a defensive boundary check. 17 new tests in test_zoom.py (8 `_format_line_numbers` low-level tests covering basic / empty / zoom-1 / offset-shift / custom-width / defensive-zoom / negative-first-row / `gutter=" │ "` default; 2 `parse_args` tests covering default-off / flagged; 6 `main()` end-to-end tests covering render-with-gutter / offset-shifts-numbering / zoom-2-repeats-number / announcement-still-fires / off-by-default / quiet-still-emits-gutter; 1 follow integration test proving the gutter tracks the tail of a live file; 1 help-text regression guard). 690/690 green. Static completion files regenerated (--line-numbers shows up in Tab completion for every shell).
 - 2026-09-21 — paw-zoom: add `--col-ruler` flag. The column-number companion of `--line-numbers`: prepends a 1-line ruler above the magnified viewport (same shape as the ruler in `vim` / `nano` / `less`), so the user can correlate a magnified column with its source position. The ruler is exactly `cols * zoom` code points wide (matching the magnified viewport below it), and shows the *last digit* of each source column index repeated `zoom` times — the standard editor-ruler convention. The first source column in view is `col_offset + 1` (1-based, matching the `--line-numbers` convention for rows); `--col-offset` is clamped to `1` via the same `max(1, cfg.col_offset + 1)` idiom the existing `row_offset` path uses. Composes with every render-driving flag (--zoom / --rows / --cols / --offset / --col-offset / --charset / --live / --follow / --max-frames / --max-seconds / --snapshot) and is silently ignored by the discovery flags (--list-backends, --info, --size, --stats, --sha) and --raw, which never produce magnified output to annotate. Composes with `--line-numbers` by applying `--line-numbers` *first* (so the gutter prefixes only the viewport lines) and then `--col-ruler` (so the ruler sits cleanly above the guttered lines, not behind a spurious gutter prefix) — together they form a "spreadsheet view" of the magnified block. The ruler does not count against `--rows`: the magnified viewport's vertical extent is unchanged. New public helper `_format_col_ruler(rendered, *, zoom, cols, first_source_col=1)` is pure: it walks the source columns, extracts `str(col_index)[-1]` for each, concatenates `digit * zoom` into the ruler, and pads / truncates defensively to `cols * zoom` code points. Empty `rendered` is a no-op (the `--raw` and the no-frame case both rely on this), matching `_format_line_numbers`'s convention; a non-positive `zoom` is treated defensively as `1`; the `first_source_col` kwarg is the injection point so tests can exercise the offset-shift path without going through the CLI. 18 new tests in test_zoom.py (7 `_format_col_ruler` low-level tests covering basic / empty / zoom-2 / offset / zoom-1-offset / multi-digit-columns / defensive-zoom; 2 `parse_args` tests covering default-off / flagged; 7 `main()` end-to-end tests covering render-with-ruler / zoom-2-repeats-digit / offset-shifts-numbering / off-by-default / quiet-still-emits-ruler / composes-with-line-numbers / discovery-silent; 1 follow integration test proving the ruler stays stable across frames; 1 help-text regression guard). 708/708 green. Static completion files regenerated (--col-ruler shows up in Tab completion for every shell).
+- 2026-09-21 — paw-zoom: add `--border` flag. The frame-side companion of `--line-numbers` and `--col-ruler`: wraps the rendered output in a light ASCII box (`+---+` on top and bottom, `| … |` on every side), so the magnified block is visually separated from the surrounding terminal context. The frame hugs the content — its width matches the longest line, so a one-line viewport and a ten-line viewport both get a border that fits; short lines are right-padded with spaces to the box width before the right-hand border is added. Composes with every render-driving flag (--zoom / --rows / --cols / --offset / --col-offset / --charset / --line-numbers / --col-ruler / --live / --follow / --max-frames / --max-seconds / --snapshot) by running LAST in the render pipeline, so the border sits cleanly on the *outside* of every other annotation — a render with `--border --line-numbers --col-ruler` looks like a framed "spreadsheet view" of the magnified block. Silently ignored by the discovery flags (--list-backends, --info, --size, --stats, --sha) and --raw, which never produce magnified output to frame. New public helper `_format_border(rendered)` is pure: it splits `rendered` into lines (using `str.splitlines()` so a single trailing newline doesn't add a phantom `| |` row at the bottom), determines the box width from the longest line, and emits the top / padded-content / bottom trio. Unlike `_format_col_ruler` and `_format_line_numbers`, an empty `rendered` is still wrapped (a 1-cell empty frame is a valid "draw me a box" answer). 16 new tests in test_zoom.py (6 `_format_border` low-level tests covering basic / multi-line / empty / short-line-padding / trailing-newline-no-phantom / unicode-codepoint-count; 2 `parse_args` tests covering default-off / flagged; 7 `main()` end-to-end tests covering render-with-frame / off-by-default / quiet-still-emits-frame / composes-with-line-numbers / composes-with-col-ruler / discovery-silent / snapshot-writes-frame; 1 help-text regression guard). 724/724 green. Static completion files regenerated (--border shows up in Tab completion for every shell).
 <!-- TICK-LOG-END -->
 
 (Updated 2026-09-17: `paw-zoom` v0.2 ships the screen-capture

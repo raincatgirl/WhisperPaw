@@ -382,6 +382,68 @@ def _format_col_ruler(
     return ruler + "\n" + rendered
 
 
+def _format_border(rendered: str) -> str:
+    """Wrap ``rendered`` in a light box-drawing border.
+
+    The border is a single ``+---+`` line above, a single ``+---+``
+    line below, and a ``| … |`` pair added to every existing line
+    of ``rendered``. The horizontal width of the border always
+    matches the longest existing line so a 1-line ``rendered`` and a
+    10-line ``rendered`` both get a border that hugs the content.
+
+    Why a wrapper instead of an in-pipeline annotation: every other
+    render-time helper (``_format_line_numbers`` /
+    ``_format_col_ruler``) operates on the *inner* content (gutter
+    on the left of every line, ruler on top), so the border can sit
+    cleanly on the outside. That keeps the order in ``main()``
+    straightforward — ``_format_border`` is always the *last*
+    step, wrapping the gutter + ruler + viewport as a unit.
+
+    Conventions:
+
+    * An empty ``rendered`` is still wrapped (the user asked for a
+      border around an empty viewport, which is a perfectly
+      reasonable "draw me a box" request — the output is
+      ``+--+\n|  |\n+--+\n``). The ``--raw`` and the no-frame case
+      don't ask for a border, so this no-op doesn't bite them.
+    * Lines shorter than the maximum are right-padded with spaces
+      to the box width before the right-hand border is added, so
+      the right edge of the box is always a single column. The
+      ``--raw``-style "no padding" convention doesn't apply here
+      because the border *is* a per-line frame; padding is the
+      visible contract.
+    * ``str.splitlines()`` is used (not ``split("\\n")``) so a
+      trailing newline in the source doesn't produce a spurious
+      empty line of ``| |`` at the bottom — the standard editor
+      convention for "the last row of the box is the last row of
+      content".
+
+    The helper is pure: it doesn't know about the renderer, the
+    source, the cfg, or the CLI — it just wraps whatever string
+    it's given.
+    """
+    if not rendered:
+        # Even an empty viewport gets a 1-cell box, so the user
+        # can see *that* the border was applied. Same convention
+        # ``_format_col_ruler``'s empty case is the explicit
+        # exception to: there the empty case is a no-op because
+        # the ruler is a single line that the user would never
+        # want to see alone; here the border is a *frame* and an
+        # empty frame is a valid frame.
+        return "+\n| \n+\n"
+    # ``splitlines()`` handles ``\n`` and ``\r\n`` line endings,
+    # and *drops* a single trailing newline (so the bottom
+    # border isn't pushed down by a phantom empty line).
+    lines = rendered.splitlines()
+    width = max(len(line) for line in lines)
+    top = "+" + "-" * width + "+"
+    bottom = "+" + "-" * width + "+"
+    padded = [
+        "|" + line.ljust(width) + "|" for line in lines
+    ]
+    return "\n".join([top, *padded, bottom])
+
+
 def render_viewport(source: str, cfg: ZoomConfig) -> str:
     """Render the magnified viewport for ``source`` under ``cfg``.
 
@@ -773,6 +835,7 @@ def _tail_and_render(
     sink=None,
     line_numbers: bool = False,
     col_ruler: bool = False,
+    border: bool = False,
 ) -> int:
     """Follow ``path`` and re-render the magnified viewport on each change.
 
@@ -930,6 +993,13 @@ def _tail_and_render(
                 cols=frame_cfg.cols,
                 first_source_col=max(1, frame_cfg.col_offset + 1),
             )
+        if border:
+            # --border: per-frame, wrap the (guttered, ruled)
+            # viewport in a light box-drawing frame. Applied LAST
+            # so the border sits cleanly on the outside of every
+            # other annotation, the same way the one-shot
+            # ``main()`` path composes the annotations.
+            rendered = _format_border(rendered)
         if sink is not None:
             sink(rendered)
         else:
@@ -959,6 +1029,7 @@ def _tail_screen_and_render(
     has_changed=None,
     line_numbers: bool = False,
     col_ruler: bool = False,
+    border: bool = False,
 ) -> int:
     """Follow a screen-capture adapter and re-render the magnified
     viewport on every change.
@@ -1141,6 +1212,14 @@ def _tail_screen_and_render(
                 cols=frame_cfg.cols,
                 first_source_col=max(1, frame_cfg.col_offset + 1),
             )
+        if border:
+            # --border: per-frame, wrap the (guttered, ruled)
+            # screen-capture viewport in a light box-drawing
+            # frame. The screen-tail mirrors the text-source
+            # tail: every render-time annotation is applied in
+            # the same order so a snapshot of either path is
+            # visually interchangeable.
+            rendered = _format_border(rendered)
         if sink is not None:
             sink(rendered)
         else:
@@ -1282,6 +1361,32 @@ def build_parser() -> argparse.ArgumentParser:
             "produce magnified output to annotate. The ruler does "
             "not count against --rows: the magnified viewport's "
             "vertical extent is unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--border",
+        action="store_true",
+        dest="border",
+        help=(
+            "Wrap the rendered output in a light box-drawing frame "
+            "(a '|' on each side of every line, with a '+---+' "
+            "line on top and bottom). The frame hugs the content: "
+            "its width matches the longest line, so a one-line "
+            "viewport and a ten-line viewport both get a border "
+            "that fits. Useful for visually separating the "
+            "magnified block from the surrounding terminal "
+            "context — and for piping into downstream tools that "
+            "expect a 'framed' block of text. Composes with every "
+            "render-driving flag (--zoom / --rows / --cols / "
+            "--offset / --col-offset / --charset / --line-numbers / "
+            "--col-ruler / --live / --follow / --max-frames / "
+            "--max-seconds / --snapshot); the border sits on the "
+            "*outside* of --line-numbers and --col-ruler, so a "
+            "render with all three annotations looks like a "
+            "framed 'spreadsheet view' of the magnified block. "
+            "Ignored by the discovery flags (--list-backends, "
+            "--info, --size, --stats, --sha) and --raw, which never "
+            "produce magnified output to frame."
         ),
     )
     parser.add_argument(
@@ -2049,6 +2154,7 @@ def main(argv: list[str] | None = None) -> int:
                     sink=_sink,
                     line_numbers=args.line_numbers,
                     col_ruler=args.col_ruler,
+                    border=args.border,
                 )
                 return _tail_and_render(
                     args.file,
@@ -2060,6 +2166,7 @@ def main(argv: list[str] | None = None) -> int:
                     sink=_sink,
                     line_numbers=args.line_numbers,
                     col_ruler=args.col_ruler,
+                    border=args.border,
                 )
         except KeyboardInterrupt:
             # Ctrl-C is a clean exit in --live mode. Don't print
@@ -2109,6 +2216,18 @@ def main(argv: list[str] | None = None) -> int:
             cols=cfg.cols,
             first_source_col=first_col,
         )
+    if args.border:
+        # --border: wrap the (possibly guttered, possibly ruled)
+        # viewport in a light box-drawing frame. Applied LAST so the
+        # border sits cleanly on the outside of every other
+        # annotation. The helper is width-agnostic: it pads short
+        # lines to the longest existing line before drawing the
+        # right-hand border, so the box always hugs its content
+        # even when the gutter widens the visible width. With
+        # ``--snapshot`` the box is what gets written to the file —
+        # i.e. ``paw-zoom --border --snapshot frame.txt …`` writes
+        # a complete bordered frame on every render.
+        rendered = _format_border(rendered)
     if args.snapshot is not None:
         try:
             # Create or overwrite. Text mode preserves the codepoint
