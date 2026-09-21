@@ -60,6 +60,7 @@ complete -c paw-zoom -l max-seconds -d 'Cap --live at SECS wall-clock seconds (d
 complete -c paw-zoom -l raw -d 'Dump the source (text or screen) to stdout as plain text, with no magnification…'
 complete -c paw-zoom -l size -d 'Print the source dimensions (rows x cols, in code points) and exit 0 without re…'
 complete -c paw-zoom -l stats -d 'Print per-source statistics (chars, lines, non-blank lines, max line width, mea…'
+complete -c paw-zoom -l words -d 'Print per-source word counts (total whitespace-delimited tokens, plus the case-…'
 complete -c paw-zoom -l sha -d 'Print a stable hex digest of the source (default: SHA-256, 64 lowercase hex cha…'
 complete -c paw-zoom -l sha-algo -d 'Hash algorithm for --sha (default: sha256).'
 complete -c paw-zoom -l screen -d 'Capture a rectangular region of the visual screen and magnify it, instead of ma…'
@@ -68,4 +69,4 @@ complete -c paw-zoom -l backend -d 'Screen-capture backend to use when --screen 
 complete -c paw-zoom -l fake-grid -d 'With --backend fake, the text used as the \'screen\' (rows separated by \'\n\').'
 complete -c paw-zoom -l list-backends -d 'Print the names of every supported screen-capture backend, one per line, and ex…'
 complete -c paw-zoom -l info -d 'Print a short description of the screen-capture setup this invocation would use…'
-complete -c paw-zoom -l json -d 'Combine with --list-backends, --info, --size, or --stats to emit a single-line…'
+complete -c paw-zoom -l json -d 'Combine with --list-backends, --info, --size, --stats, --words, or --sha to emi…'

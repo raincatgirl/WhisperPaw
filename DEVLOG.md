@@ -2564,3 +2564,145 @@ describe helper refactor (a refactor across modules,
 deferred unless someone asks). The repo is healthy:
 all four tools shipped, the test suite is green, the
 roadmap is up to date.
+
+## 2026-09-21 — `paw-zoom --words` ships: lexical-density discovery
+
+**What changed.** A new `--words` flag on `paw-zoom`
+prints two per-source counts — total whitespace-delimited
+tokens, plus the case-folded distinct-token count — and
+exits 0 without rendering or capturing anything. It's
+the tokenisation companion of `--size` and `--stats`:
+`--size` answers "how big is the source as a rectangle?";
+`--stats` answers "what is in the source?" (chars / lines
+/ widths); `--words` answers "what is the lexical shape
+of the source?" Useful in scripts that want to branch on
+"is this a real document or a machine-generated log
+line?" — a log line typically has 1–3 words with 1
+unique; a paragraph has 50+ words with many uniques.
+
+**Why now.** Every other tick in the v0.2 series has
+added a discovery flag (`--info`, `--size`, `--stats`,
+`--sha`); `--words` was the natural next-of-kin and the
+only remaining "counting" question the source
+introspection layer didn't already answer. The four
+existing discovery flags now form a complete picture:
+shape (`--size`), content (`--stats`), lexical
+(`--words`), identity (`--sha`), screen setup
+(`--info`), and screen backends (`--list-backends`).
+
+**How.** New public helpers in `whisperpaw.zoom`:
+
+* `SourceWords = tuple[int, int]` — the canonical
+  `SourceSize` / `SourceStats` style named alias.
+* `_source_words(source) -> (words, unique_words)` —
+  the pure tokenisation helper. `str.split()` does
+  the heavy lifting (same convention `wc -w` uses, so
+  a CJK string with no ASCII whitespace counts as one
+  word). Drops a single trailing empty line if the
+  source ends in `\n` (same convention
+  `_source_size` and `_source_stats` use, so a file
+  ending in a newline doesn't push a phantom blank
+  into the token stream). Empty / whitespace-only
+  source reports `(0, 0)` — the "nothing to count"
+  answer, deliberately diverging from `_source_size`'s
+  `(1, 0)` on the same input because the two flags
+  answer different questions (renderer-shape vs
+  content-count). `unique_words` is the size of the
+  **case-folded** token set (so `Hello` and `hello`
+  collapse to one distinct word) — casefold over
+  `str.lower` so a token like `ß` is treated the same
+  as `ss`.
+* `_words_to_text(words)` — the 2-line fixed
+  `key: value` block (one line per field, canonical
+  order, `print()`-compatible, easy to grep).
+* `_words_to_json(words)` — the single-line parseable
+  `{"unique_words": M, "words": N}` object (sorted
+  keys + `ensure_ascii=False`, so a downstream
+  `jq '.words'` and friends work without further
+  coercion).
+
+**CLI.** `--words` works for all three source-
+resolution paths (positional, `--file`, `--screen` with
+`--backend` / `--region` / `--fake-grid` for screen
+capture), short-circuits at the same point `--size` and
+`--stats` do (after source resolution, before the
+render / `--raw` block), and is mutually exclusive with
+`--size` / `--stats` / `--info` / `--live` / `--follow` /
+`--max-frames` / `--snapshot` / `--raw` / `--list-backends`
+(exit 2 with a clear stderr message). The mutual-
+exclusion check is ordered AFTER `--size`'s and
+`--stats`'s (so their contradiction messages win on a
+tie — the discovery-flags-with-other-discovery-flags
+convention the `--size`-block's docstring spells out)
+and BEFORE `--sha`'s (so `--sha` wins on a
+`--words --sha` tie). `--json` composes with `--words`
+→ `{"unique_words": M, "words": N}`. The viewport-
+modifying flags (`--zoom` / `--rows` / `--cols` /
+`--offset` / `--col-offset` / `--charset`) are
+silently ignored in `--words` mode — a shell alias can
+keep them without breaking the report.
+
+**The one refactor I had to make.** Adding `--words`
+to the `--size` / `--stats` / `--sha` mutual-exclusion
+flag-walks so the existing `--size`-wins-on-tie rule
+is preserved when more than one discovery flag is set.
+Without it, `--words --size` would have printed
+`--words cannot be combined with --size` (because
+`--words`'s own check runs after `--size`'s), which
+inverts the existing convention. Three one-line
+additions, fully covered by the new test suite.
+
+**Tests.** 40 new tests in `tests/test_zoom.py`:
+
+* 11 `_source_words` low-level tests (basic / empty /
+  whitespace-only / drops-trailing-newline / keeps-
+  internal-newlines / mixed-whitespace / case-folding /
+  CJK single-token / CJK mixed / punctuation-attached /
+  dedup-counted-per-occurrence).
+* 3 `_words_to_text` / `_words_to_json` tests (format /
+  round-trip / zero-case / key-order).
+* 2 `parse_args` tests (default-off / flagged-composes).
+* 17 `main()` end-to-end tests (positional text mode /
+  multiline / JSON mode / whitespace-file-is-zero /
+  file source / file missing / screen capture with
+  FakeScreen / unsupported screen backend exit-1 / no
+  source exit-2 / 10 mutual-exclusion rejections
+  covering all combinations of `--size` / `--stats` /
+  `--info` / `--live` / `--follow` / `--max-frames` /
+  `--snapshot` / `--raw` / `--list-backends` / `--sha` /
+  quiet no-op / silent-viewport-flag-ignoring / short-
+  circuits-before-render).
+* 1 help-text regression guard (catches an accidental
+  rename of the flag).
+
+The new tests also updated three pre-existing tests in
+`test_zoom.py` / `test_screen.py` to reflect the
+expanded `--json requires` message (the new flag shows
+up in the discovery-flag list).
+
+**Bookkeeping.** Regenerated all four static shell-
+completion files (`completions/whisperpaw.{bash,zsh,
+fish,nu}`) so `--words` shows up in Tab completion for
+every shell. The byte-identity test in
+`tests/test_completions.py` caught the drift and
+forced the regen, as it has for every prior tick.
+
+**Total: 764/764 green** (40 new + 724 existing).
+Pure stdlib, no new pip deps, no telemetry, no
+network. The new helpers live next to
+`_source_size` / `_source_stats` / `_source_sha` in
+`whisperpaw/zoom.py` so the text-source-introspection
+public surface stays co-located.
+
+**Next tick.** All seven discovery flags are now in
+place (`--list-backends`, `--info`, `--size`, `--stats`,
+`--words`, `--sha`, plus the render-driving `--raw`).
+Natural follow-ups: a fourth sound pack (still needs
+a user request), the shared `to_json()` helper refactor
+(deferred unless someone asks), or a
+`paw-zoom --list-capture-info`-style introspection that
+prints the *chained* discovery story in one shot
+("backend=x11, available=yes, source=24x80,
+words=312, sha256=…") for a CI artefact. None of
+those is ready today; will pick based on what the user
+actually needs next.

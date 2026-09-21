@@ -742,6 +742,121 @@ def _stats_to_json(stats: SourceStats) -> str:
     )
 
 
+#: Per-source word counts reported by ``paw-zoom --words``. A
+#: standalone named alias so callers don't have to remember the
+#: positional order; mirrors the :data:`SourceSize` and
+#: :data:`SourceStats` style.
+#:
+#: The two fields, in canonical order:
+#:
+#: * ``words`` — total whitespace-delimited tokens. A "word" is
+#:   the same shape :mod:`shlex` / :func:`str.split` produce by
+#:   default: one or more non-whitespace code points, separated
+#:   by ASCII whitespace (space / tab) or by a newline. The
+#:   renderer doesn't care about word boundaries, so a CJK line
+#:   like ``"日本語のテキスト"`` counts as one word (no ASCII
+#:   whitespace) — same convention :mod:`wc -w` uses, which is
+#:   the most familiar comparison point.
+#: * ``unique_words`` — number of distinct tokens (case-folded),
+#:   after the same whitespace tokenisation. Case-folding is the
+#:   standard "ignore case for counting" answer (matches what
+#:   :mod:`grep -i` reports); a user who needs case-sensitive
+#:   uniqueness can read the source with ``--raw`` and pipe it
+#:   through ``sort -u``.
+SourceWords = tuple[int, int]
+
+
+def _source_words(source: str) -> SourceWords:
+    """Return ``(words, unique_words)`` for ``source``.
+
+    The "lexical-density" discovery — the text-side analog of
+    ``--size`` (dimensions) and ``--stats`` (counts). ``--size``
+    answers "how big is the source as a rectangle?"; ``--stats``
+    answers "what is in the source?" (chars / lines / widths);
+    ``--words`` answers "what is the lexical shape of the
+    source?" (token count + distinct-token count). Useful in
+    scripts that want to branch on "is this a real document or a
+    machine-generated log line?" — a log line typically has
+    1–3 words with 1 unique; a paragraph has 50+ words with
+    many uniques.
+
+    Conventions match the rest of the source-introspection
+    helpers:
+
+    * Lines are split on ``\\n`` (same as :func:`_source_size`
+      and :func:`_source_stats`).
+    * A single trailing empty line is dropped when the source
+      ends in ``\\n`` (same convention as the rest of the
+      module), so a file ending in a newline doesn't push a
+      phantom blank into the token stream.
+    * An empty / whitespace-only source reports ``(0, 0)`` — the
+      "nothing to count" answer, same divergence from
+      :func:`_source_size`'s ``(1, 0)`` on the same input that
+      :func:`_source_stats` makes on purpose (the two flags
+      answer different questions: "what would the renderer
+      show?" vs "how much content is there?").
+    * Tokenisation is :func:`str.split` — whitespace-delimited
+      runs of one or more non-whitespace code points. No
+      punctuation stripping, no quote handling, no stemming —
+      the goal is "how many tokens does :mod:`wc -w` see?",
+      not "how many lemmas?". The shape matches what
+      :mod:`shlex` would produce for an unquoted word stream
+      and is what most downstream tooling (``sort | uniq -c``,
+      ``tr ' ' '\\n' | sort -u``, :mod:`collections.Counter`)
+      would produce on the same input.
+    * ``unique_words`` is computed from the case-folded token
+      list, so ``"Hello"`` and ``"hello"`` count as the same
+      distinct word. The case-folding is done once over the
+      full list (not in a set comprehension over the original
+      list) so a token like ``"ß"`` (which :meth:`str.casefold`
+      expands to ``"ss"``) is counted as a single distinct
+      word regardless of which form the user wrote.
+    """
+    if not source:
+        return (0, 0)
+    # Drop a single trailing empty line so a file ending in ``\n``
+    # doesn't push a phantom blank into the token stream. This is
+    # the same convention :func:`_source_size` / :func:`_source_stats`
+    # / :func:`_tail_offset` use.
+    if source.endswith("\n"):
+        source = source[:-1]
+    if not source:
+        return (0, 0)
+    tokens = source.split()
+    if not tokens:
+        return (0, 0)
+    unique = len({t.casefold() for t in tokens})
+    return (len(tokens), unique)
+
+
+def _words_to_text(words: SourceWords) -> str:
+    """Render a :data:`SourceWords` as a 2-line fixed ``key: value`` block.
+
+    Parallel to :func:`_stats_to_text` — fixed format, predictable
+    layout, easy to grep / awk. Each field is on its own line so a
+    downstream consumer can pick either with a one-line selector
+    (``grep '^words:'`` / ``grep '^unique_words:'``).
+    """
+    total, unique = words
+    return f"words: {total}\nunique_words: {unique}"
+
+
+def _words_to_json(words: SourceWords) -> str:
+    """Render a :data:`SourceWords` as a single-line parseable JSON object.
+
+    Parallel to :func:`_size_to_json` and :func:`_stats_to_json` —
+    the shape ``{"words": N, "unique_words": M}`` is fixed so
+    ``jq '.words'`` and friends work without further coercion.
+    Single-line, sorted keys, ``ensure_ascii=False``.
+    """
+    total, unique = words
+    return json.dumps(
+        {"unique_words": unique, "words": total},
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+
+
 #: Algorithm used by ``paw-zoom --sha``. Centralised so the help
 #: text, the JSON key, and the underlying :mod:`hashlib` call all
 #: agree (changing it would be a one-line edit instead of a
@@ -1542,6 +1657,34 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--words",
+        action="store_true",
+        dest="words",
+        help=(
+            "Print per-source word counts (total whitespace-"
+            "delimited tokens, plus the case-folded distinct "
+            "token count) and exit 0 without rendering or "
+            "capturing anything. The source is resolved exactly "
+            "the way it would be for a render (positional -> "
+            "--file -> stdin -> --screen with --backend/--region/"
+            "--fake-grid for screen capture), then tokenised on "
+            "whitespace (same convention 'wc -w' uses, so a CJK "
+            "string with no ASCII whitespace counts as one word). "
+            "The lexical-density companion of --size and --stats: "
+            "--size answers 'how big is the source as a "
+            "rectangle?'; --stats answers 'what is in the source?' "
+            "(chars / lines / widths); --words answers 'what is "
+            "the lexical shape of the source?' (token count + "
+            "distinct-token count). Combine with --json for a "
+            "single-line parseable object ({'unique_words': M, "
+            "'words': N}). Mutually exclusive with --size, "
+            "--stats, --info, --live, --follow, --max-frames, "
+            "--snapshot, --raw, and --list-backends (all of "
+            "them exist to drive a render or a different "
+            "discovery; --words is the 'lexical' discovery)."
+        ),
+    )
+    parser.add_argument(
         "--sha",
         action="store_true",
         dest="sha",
@@ -1603,18 +1746,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="as_json",
         help=(
-            "Combine with --list-backends, --info, --size, or "
-            "--stats to emit a single-line JSON object instead of "
-            "the default text output. --list-backends --json -> "
-            "{'backends': [...]}; --info --json -> {'backend': "
-            "..., 'available': ..., 'adapter': ..., "
-            "'screen_size': [w, h], 'region': [x, y, w, h]}; "
-            "--size --json -> {'rows': N, 'cols': M}; --stats "
-            "--json -> {'chars': N, 'lines': M, "
+            "Combine with --list-backends, --info, --size, "
+            "--stats, --words, or --sha to emit a single-line "
+            "JSON object instead of the default text output. "
+            "--list-backends --json -> {'backends': [...]}; "
+            "--info --json -> {'backend': ..., 'available': ..., "
+            "'adapter': ..., 'screen_size': [w, h], 'region': "
+            "[x, y, w, h]}; --size --json -> {'rows': N, 'cols': "
+            "M}; --stats --json -> {'chars': N, 'lines': M, "
             "'non_blank_lines': K, 'max_line_width': W, "
-            "'mean_line_width': X.XX}. Using --json without "
-            "--list-backends, --info, --size, or --stats is a "
-            "usage error (exit 2)."
+            "'mean_line_width': X.XX}; --words --json -> "
+            "{'unique_words': M, 'words': N}; --sha --json -> "
+            "{'algorithm': 'sha256', 'sha256': '...'}. Using "
+            "--json without --list-backends, --info, --size, "
+            "--stats, --words, or --sha is a usage error "
+            "(exit 2)."
         ),
     )
     return parser
@@ -1664,6 +1810,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         for flag, value in (
             ("--info", args.info),
             ("--stats", args.stats),
+            ("--words", args.words),
             ("--live", args.live),
             ("--follow", args.follow),
             ("--max-frames", args.max_frames),
@@ -1697,6 +1844,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         for flag, value in (
             ("--size", args.size),
             ("--info", args.info),
+            ("--words", args.words),
             ("--live", args.live),
             ("--follow", args.follow),
             ("--max-frames", args.max_frames),
@@ -1708,6 +1856,41 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 print(
                     f"paw-zoom: --stats cannot be combined with {flag} "
                     f"(--stats is a metadata-only mode that exits "
+                    f"before any render or other discovery)",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
+    # --words is the *lexical* discovery — the tokenisation
+    # companion of --size / --stats. It runs through the same
+    # source-resolution block --size and --stats do (so the
+    # source can be a text arg, --file, stdin, or a --screen
+    # capture) and short-circuits BEFORE the render / --raw
+    # block, so it contradicts the same render-driving flags
+    # they do, plus the other discovery flags (--size,
+    # --stats, --info, --list-backends) for the same reason
+    # they do: each one is a different kind of discovery,
+    # and we don't want to emit more than one of them per
+    # invocation. We run this check *after* the --size and
+    # --stats blocks above so their mutual-exclusion
+    # messages win when more than one discovery flag would
+    # fire (the contradiction between two discovery flags
+    # is the more useful diagnostic).
+    if args.words:
+        for flag, value in (
+            ("--size", args.size),
+            ("--stats", args.stats),
+            ("--info", args.info),
+            ("--live", args.live),
+            ("--follow", args.follow),
+            ("--max-frames", args.max_frames),
+            ("--snapshot", args.snapshot),
+            ("--raw", args.raw),
+            ("--list-backends", args.list_backends),
+        ):
+            if value:
+                print(
+                    f"paw-zoom: --words cannot be combined with {flag} "
+                    f"(--words is a metadata-only mode that exits "
                     f"before any render or other discovery)",
                     file=sys.stderr,
                 )
@@ -1734,6 +1917,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         for flag, value in (
             ("--size", args.size),
             ("--stats", args.stats),
+            ("--words", args.words),
             ("--info", args.info),
             ("--live", args.live),
             ("--follow", args.follow),
@@ -1858,15 +2042,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 )
                 raise SystemExit(2)
     # --json only pairs with --list-backends, --info, --size,
-    # --stats, or --sha. Anything else is ambiguous — an empty
+    # --stats, --words, or --sha. Anything else is ambiguous — an empty
     # JSON object would be a worse failure mode than a clear
     # stderr message.
     if args.as_json and not (
-        args.list_backends or args.info or args.size or args.stats or args.sha
+        args.list_backends
+        or args.info
+        or args.size
+        or args.stats
+        or args.words
+        or args.sha
     ):
         print(
             "paw-zoom: --json requires --list-backends, --info, "
-            "--size, --stats, or --sha",
+            "--size, --stats, --words, or --sha",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -2010,6 +2199,27 @@ def main(argv: list[str] | None = None) -> int:
             print(_stats_to_json(stats))
         else:
             print(_stats_to_text(stats))
+        return 0
+
+    # v0.2.5: --words is the *lexical* companion of --size and
+    # --stats. --size answers "how big is the source as a
+    # rectangle?"; --stats answers "what is in the source?"
+    # (chars / lines / widths); --words answers "what is the
+    # lexical shape of the source?" (token count + distinct-
+    # token count). It runs at the same point in the pipeline as
+    # --size and --stats (after source resolution, before the
+    # render / --raw block) so the source it tokenises is the
+    # source the renderer would see, and a user can pipe the
+    # same input through any of the three flags without
+    # surprises. Mutual-exclusion is enforced in parse_args() —
+    # reaching this branch with --words means the user asked
+    # for exactly one thing.
+    if args.words:
+        words = _source_words(source)
+        if args.as_json:
+            print(_words_to_json(words))
+        else:
+            print(_words_to_text(words))
         return 0
 
     # v0.2.4: --sha is the *fingerprint* discovery — the

@@ -1848,15 +1848,15 @@ def test_main_size_mutual_exclusion_with_list_backends(capsys) -> None:
 
 def test_main_size_json_without_discovery_flag_is_usage_error(capsys) -> None:
     """``--json`` without ``--list-backends`` / ``--info`` /
-    ``--size`` / ``--stats`` / ``--sha`` is a usage error
-    (exit 2). Same fail-fast the ``--list-backends --json``
-    combo used to do."""
+    ``--size`` / ``--stats`` / ``--words`` / ``--sha`` is a
+    usage error (exit 2). Same fail-fast the
+    ``--list-backends --json`` combo used to do."""
     rc = zoom.main(["--json"])
     captured = capsys.readouterr()
     assert rc == 2
     assert (
         "--json requires --list-backends, --info, --size, "
-        "--stats, or --sha"
+        "--stats, --words, or --sha"
         in captured.err
     )
 
@@ -2387,15 +2387,15 @@ def test_main_stats_mutual_exclusion_with_list_backends(capsys) -> None:
 
 def test_main_stats_json_without_discovery_flag_is_usage_error(capsys) -> None:
     """``--json`` without ``--list-backends`` / ``--info`` /
-    ``--size`` / ``--stats`` / ``--sha`` is a usage error
-    (exit 2). Same fail-fast the ``--list-backends --json``
-    combo used to do."""
+    ``--size`` / ``--stats`` / ``--words`` / ``--sha`` is a
+    usage error (exit 2). Same fail-fast the
+    ``--list-backends --json`` combo used to do."""
     rc = zoom.main(["--json"])
     captured = capsys.readouterr()
     assert rc == 2
     assert (
         "--json requires --list-backends, --info, --size, "
-        "--stats, or --sha"
+        "--stats, --words, or --sha"
         in captured.err
     )
 
@@ -4289,3 +4289,446 @@ def test_help_text_mentions_border() -> None:
     """
     help_text = zoom.build_parser().format_help()
     assert "--border" in help_text
+
+
+# ---------------------------------------------------------------------------
+# ``--words`` discovery (the lexical companion of ``--size`` / ``--stats``)
+# ---------------------------------------------------------------------------
+
+
+def test_source_words_basic() -> None:
+    """``"hello world hello"`` → 3 words, 2 unique
+    (case-folded). ``unique_words`` collapses ``hello``
+    with ``Hello`` (same word under different case)."""
+    assert zoom._source_words("hello world hello") == (3, 2)
+
+
+def test_source_words_empty_string() -> None:
+    """An empty source is ``(0, 0)`` — the "nothing to
+    count" answer. Deliberately diverges from
+    ``_source_size``'s ``(1, 0)`` on the same input
+    because the two flags answer different questions
+    (renderer-shape vs content-count)."""
+    assert zoom._source_words("") == (0, 0)
+
+
+def test_source_words_whitespace_only() -> None:
+    """A whitespace-only source is also ``(0, 0)`` —
+    nothing meaningful to count."""
+    assert zoom._source_words("   \t  \n  \n") == (0, 0)
+
+
+def test_source_words_drops_trailing_newline() -> None:
+    """A file ending in ``\\n`` doesn't push a phantom
+    blank into the token stream — same convention
+    ``_source_size`` and ``_source_stats`` use."""
+    assert zoom._source_words("one two three\n") == (3, 3)
+
+
+def test_source_words_keeps_internal_newlines() -> None:
+    """Internal newlines split tokens exactly like
+    spaces (it's all whitespace to ``str.split``)."""
+    assert zoom._source_words("alpha\nbeta\ngamma") == (3, 3)
+
+
+def test_source_words_mixed_whitespace() -> None:
+    """Runs of mixed whitespace (space, tab, newline)
+    collapse to a single token boundary, the same way
+    ``wc -w`` counts them."""
+    assert zoom._source_words("a  b\tc\nd\te") == (5, 5)
+
+
+def test_source_words_case_folding() -> None:
+    """``unique_words`` is computed from the
+    case-folded token list, so ``Hello`` and ``hello``
+    count as the same distinct word. The case-folding
+    is done with ``str.casefold``, not ``str.lower``,
+    so a token like ``"ß"`` is treated the same as
+    ``"ss"``."""
+    assert zoom._source_words("Hello hello HELLO HeLlO") == (4, 1)
+
+
+def test_source_words_cjk_single_token() -> None:
+    """A CJK string with no ASCII whitespace counts
+    as one word, the same way ``wc -w`` counts it.
+    Multi-byte characters are token boundaries only
+    if they're whitespace."""
+    assert zoom._source_words("日本語のテキスト") == (1, 1)
+
+
+def test_source_words_cjk_mixed_with_ascii() -> None:
+    """Mixing CJK and ASCII tokens works as expected:
+    each whitespace-delimited run is one token."""
+    assert zoom._source_words("hello 日本語 world") == (3, 3)
+
+
+def test_source_words_punctuation_attached() -> None:
+    """Punctuation attached to a word stays attached:
+    ``"hello,"`` and ``"hello"`` are two distinct
+    tokens (matches ``str.split`` / ``wc -w``
+    behaviour). Users who want lemmatisation can
+    pipe the source through a real NLP tool."""
+    # 3 words total: ``hello,`` / ``world`` / ``hello``.
+    # 3 unique (case-folded): ``hello,`` / ``world`` /
+    # ``hello`` — ``hello,`` and ``hello`` are distinct
+    # because the comma is a real character that
+    # survives case-folding (``str.casefold`` doesn't
+    # strip punctuation, only folds Unicode case).
+    assert zoom._source_words("hello, world hello") == (3, 3)
+
+
+def test_source_words_dedup_counted_per_occurrence() -> None:
+    """The total word count is per-occurrence (not
+    per-distinct), so ``"a a a"`` is ``3, 1``."""
+    assert zoom._source_words("a a a") == (3, 1)
+
+
+def test_words_to_text_format() -> None:
+    """The text rendering is a 2-line fixed
+    ``key: value`` block — parallel to
+    ``_stats_to_text``. Each field on its own line so
+    a downstream ``grep '^words:'`` / ``awk`` can
+    pick either field with a one-line selector."""
+    assert zoom._words_to_text((5, 3)) == "words: 5\nunique_words: 3"
+    assert zoom._words_to_text((0, 0)) == "words: 0\nunique_words: 0"
+    assert zoom._words_to_text((1, 1)) == "words: 1\nunique_words: 1"
+
+
+def test_words_to_json_round_trip() -> None:
+    """``--words --json`` emits a single-line parseable
+    object with the expected keys and a deterministic
+    key order (``sort_keys=True``)."""
+    s = zoom._words_to_json((5, 3))
+    assert "\n" not in s
+    assert json.loads(s) == {"unique_words": 3, "words": 5}
+
+
+def test_words_to_json_zero() -> None:
+    """The empty case is the natural ``{"unique_words":
+    0, "words": 0}`` shape — never a missing key or a
+    stringified number."""
+    assert json.loads(zoom._words_to_json((0, 0))) == {
+        "unique_words": 0,
+        "words": 0,
+    }
+
+
+def test_words_to_json_key_order() -> None:
+    """Keys come out in sorted order so a byte-stable
+    test (or a downstream diff) sees a predictable
+    shape. ``unique_words`` sorts before ``words``."""
+    s = zoom._words_to_json((7, 5))
+    # Find the position of each key and assert
+    # ``unique_words`` comes first.
+    assert s.index('"unique_words"') < s.index('"words"')
+
+
+def test_parse_args_words_default_off() -> None:
+    """``--words`` defaults to ``False`` — the discovery
+    flag is opt-in, same as ``--size`` / ``--stats`` /
+    ``--sha``."""
+    args = zoom.parse_args(["hello"])
+    assert args.words is False
+
+
+def test_parse_args_words_flag() -> None:
+    """``--words`` flips the flag and composes with the
+    text-source flags (positional / ``--file``) and
+    ``--json``."""
+    args = zoom.parse_args(["--words", "--json", "hello world"])
+    assert args.words is True
+    assert args.as_json is True
+
+
+def test_main_words_positional_text_mode(capsys) -> None:
+    """``paw-zoom --words "hello world hello"`` prints
+    the 2-line ``key: value`` block and exits 0 without
+    any rendering. ``print()`` adds a trailing ``\\n``
+    — the output is exactly what the test pins."""
+    rc = zoom.main(["--words", "hello world hello"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert out.out == "words: 3\nunique_words: 2\n"
+    assert out.err == ""
+
+
+def test_main_words_positional_multiline(capsys) -> None:
+    """A multi-line positional source: lines split on
+    ``\\n`` (same convention as ``_source_size`` and
+    ``_source_stats``), trailing ``\\n`` dropped, then
+    tokenised."""
+    rc = zoom.main(["--words", "alpha\nbeta\ngamma\n"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert out.out == "words: 3\nunique_words: 3\n"
+
+
+def test_main_words_json_mode(capsys) -> None:
+    """``--words --json`` emits a single-line parseable
+    object and exits 0. The shape matches the rest of
+    the discovery flags: sorted keys, no ASCII escaping,
+    no surrounding text."""
+    rc = zoom.main(["--words", "--json", "hello world hello"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "\n" not in out.out.rstrip("\n")
+    assert json.loads(out.out) == {"unique_words": 2, "words": 3}
+
+
+def test_main_words_whitespace_file_is_zero(tmp_path, capsys) -> None:
+    """A whitespace-only file is the natural ``(0, 0)``
+    shape — the "nothing to count" answer. The source
+    resolver accepts a whitespace-only ``--file``
+    input (only positional / stdin are stripped at
+    the resolver level — the file's bytes are
+    returned verbatim), and the tokeniser correctly
+    reports ``(0, 0)`` on it."""
+    p = tmp_path / "blank.txt"
+    p.write_text("   \t  \n\n  \n", encoding="utf-8")
+    rc = zoom.main(["--words", "--file", str(p)])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert out.out == "words: 0\nunique_words: 0\n"
+
+
+def test_main_words_file_source(tmp_path, capsys) -> None:
+    """``--words --file PATH`` reads the file and
+    reports its word counts. Sanity-checks the
+    ``--file`` path of source resolution for
+    ``--words``."""
+    p = tmp_path / "doc.txt"
+    p.write_text("the quick brown fox\njumps over the lazy dog\n", encoding="utf-8")
+    rc = zoom.main(["--words", "--file", str(p)])
+    out = capsys.readouterr()
+    assert rc == 0
+    # 9 words total: the, quick, brown, fox, jumps, over,
+    # the, lazy, dog. Case-folded distinct: the (×2),
+    # quick, brown, fox, jumps, over, lazy, dog = 8.
+    assert out.out == "words: 9\nunique_words: 8\n"
+
+
+def test_main_words_file_missing_is_error(tmp_path, capsys) -> None:
+    """``--words --file /missing`` exits 1 with a clear
+    stderr message — the file-not-found path is the
+    same one ``_resolve_source`` raises, and ``--words``
+    doesn't try to be cleverer than that."""
+    missing = tmp_path / "does-not-exist.txt"
+    rc = zoom.main(["--words", "--file", str(missing)])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "file not found" in captured.err
+
+
+def test_main_words_with_screen_capture(capsys) -> None:
+    """``--words --screen --backend fake --fake-grid "..."``
+    captures the fake screen and reports the captured
+    grid's word counts. ``FakeScreen`` truncates every
+    row to the shortest row's width, so the captured
+    grid is whatever the fake source is — here we use
+    a one-line source so the result is unambiguous."""
+    rc = zoom.main(
+        [
+            "--words",
+            "--screen",
+            "--backend",
+            "fake",
+            "--fake-grid",
+            "hello world hello",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    assert out.out == "words: 3\nunique_words: 2\n"
+
+
+def test_main_words_with_unsupported_screen_backend_exits_1(capsys) -> None:
+    """``--words --screen --backend x11`` on a headless
+    box (no ``$DISPLAY`` / ``xwd``) exits 1 with the
+    standard "not yet implemented on this OS" message
+    and the same exit code the render path uses."""
+    rc = zoom.main(["--words", "--screen", "--backend", "x11"])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "not yet implemented on this OS" in captured.err
+
+
+def test_main_words_without_any_source_exits_2(capsys, monkeypatch) -> None:
+    """``--words`` with no source (no positional, no
+    ``--file``, no stdin) is a usage error (exit 2) —
+    same convention as ``--size`` / ``--stats`` /
+    ``--sha``."""
+    # Force stdin to be empty so the resolver doesn't
+    # accidentally pick up whatever pytest captured.
+    monkeypatch.setenv("WPAW_ZOOM_STDIN_OVERRIDE", "")
+    rc = zoom.main(["--words"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "no text" in captured.err
+
+
+def test_main_words_mutual_exclusion_with_size(capsys) -> None:
+    """``--words --size`` is rejected (exit 2) — they
+    are two different kinds of discovery and we don't
+    want to emit more than one of them per invocation.
+    The ``--size``-block runs first in ``parse_args``,
+    so the contradiction message names ``--size`` as
+    the flag that found ``--words`` in conflict."""
+    rc = zoom.main(["--words", "--size", "x"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--size cannot be combined with --words" in captured.err
+
+
+def test_main_words_mutual_exclusion_with_stats(capsys) -> None:
+    """``--words --stats`` is rejected (exit 2). The
+    ``--stats``-block runs before ``--words``'s block
+    in ``parse_args`` and lists ``--words`` in its
+    flag-walk, so the message names ``--stats`` as
+    the flag that found ``--words`` in conflict."""
+    rc = zoom.main(["--words", "--stats", "x"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--stats cannot be combined with --words" in captured.err
+
+
+def test_main_words_mutual_exclusion_with_info(capsys) -> None:
+    """``--words --info`` is rejected (exit 2) — they
+    are two different kinds of discovery (``--info`` is
+    screen-capture-side, ``--words`` is text-side)."""
+    rc = zoom.main(["--words", "--info", "--screen"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--words cannot be combined with --info" in captured.err
+
+
+def test_main_words_mutual_exclusion_with_live(capsys) -> None:
+    """``--words --live`` is rejected (exit 2) —
+    ``--live`` is a render driver, ``--words`` is
+    metadata-only."""
+    rc = zoom.main(["--words", "--live", "x"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--words cannot be combined with --live" in captured.err
+
+
+def test_main_words_mutual_exclusion_with_follow(capsys) -> None:
+    """``--words --follow`` is rejected (exit 2) — same
+    rationale as ``--live``."""
+    rc = zoom.main(["--words", "--follow", "x"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--words cannot be combined with --follow" in captured.err
+
+
+def test_main_words_mutual_exclusion_with_max_frames(capsys) -> None:
+    """``--words --max-frames`` is rejected (exit 2) —
+    ``--max-frames`` is a ``--live`` modifier, and
+    ``--words`` is metadata-only."""
+    rc = zoom.main(["--words", "--max-frames", "3", "x"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--words cannot be combined with --max-frames" in captured.err
+
+
+def test_main_words_mutual_exclusion_with_snapshot(capsys) -> None:
+    """``--words --snapshot PATH`` is rejected (exit 2)
+    — ``--snapshot`` is a render driver (it writes the
+    rendered viewport to a file), and ``--words`` is
+    metadata-only. The snapshot write must NOT happen
+    even if the path is writable (a regression guard
+    against the contradiction being caught too late)."""
+    rc = zoom.main(["--words", "--snapshot", "/tmp/_paw_zoom_words_should_not_write.txt", "x"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--words cannot be combined with --snapshot" in captured.err
+
+
+def test_main_words_mutual_exclusion_with_raw(capsys) -> None:
+    """``--words --raw`` is rejected (exit 2) — ``--raw``
+    is a render driver (it dumps the source to stdout
+    verbatim), and ``--words`` is metadata-only."""
+    rc = zoom.main(["--words", "--raw", "x"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--words cannot be combined with --raw" in captured.err
+
+
+def test_main_words_mutual_exclusion_with_list_backends(capsys) -> None:
+    """``--words --list-backends`` is rejected (exit 2)
+    — ``--list-backends`` is a screen-capture-side
+    discovery, ``--words`` is text-side."""
+    rc = zoom.main(["--words", "--list-backends", "x"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--words cannot be combined with --list-backends" in captured.err
+
+
+def test_main_words_with_sha(capsys) -> None:
+    """``--words --sha`` is rejected (exit 2). The
+    ``--sha``-wins-on-tie rule (it's ordered after
+    ``--words``) means the message names ``--sha`` as
+    the offender, not ``--words``."""
+    rc = zoom.main(["--words", "--sha", "x"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    # ``--sha`` is checked after ``--words`` in parse_args,
+    # so the ``--sha`` contradiction message wins on a
+    # tie — the user gets told the more specific reason.
+    assert "--sha cannot be combined with --words" in captured.err
+
+
+def test_main_words_quiet_does_not_affect_output(capsys) -> None:
+    """``--words`` is metadata-only — there's no
+    banner to suppress, so ``--quiet`` is a silent
+    no-op (it composes cleanly without changing the
+    output shape)."""
+    rc = zoom.main(["--words", "--quiet", "hello world"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert out.out == "words: 2\nunique_words: 2\n"
+    assert out.err == ""
+
+
+def test_main_words_silently_ignores_viewport_flags(capsys) -> None:
+    """The viewport-modifying flags (``--zoom`` /
+    ``--rows`` / ``--cols`` / ``--offset`` /
+    ``--col-offset`` / ``--charset``) are silently
+    ignored in ``--words`` mode — the output shape of
+    a word count does not depend on them, so a shell
+    alias can keep them without breaking the report.
+    Same convention ``--size`` / ``--stats`` / ``--sha``
+    use."""
+    rc = zoom.main(
+        ["--words", "--zoom", "8", "--rows", "1", "--charset", "hash", "hello world"]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    assert out.out == "words: 2\nunique_words: 2\n"
+
+
+def test_main_words_short_circuits_before_render(capsys) -> None:
+    """``--words`` exits 0 without ever building a
+    ZoomConfig or calling ``render_viewport`` — a
+    direct render-test on the same input would have
+    produced a non-trivial magnified block, and a
+    regression where the render path runs *and then*
+    the discovery is emitted would fail the
+    ``assert out.err == ""`` check below (the
+    non-quiet banner would land in stderr)."""
+    rc = zoom.main(["--words", "hello"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "🐾" not in out.err  # no announcement banner
+
+
+def test_help_text_mentions_words() -> None:
+    """``--words`` is in the ``--help`` output so a
+    user who hits ``paw-zoom --help`` can find it.
+    Regression guard against an accidental rename of
+    the flag (the rest of the test suite already pins
+    the flag name in the main() end-to-end tests,
+    but the help-text regression catches the case
+    where someone refactors the parser and drops the
+    argument)."""
+    help_text = zoom.build_parser().format_help()
+    assert "--words" in help_text
