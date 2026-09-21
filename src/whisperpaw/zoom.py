@@ -305,6 +305,83 @@ def _format_line_numbers(
     return "\n".join(out)
 
 
+def _format_col_ruler(
+    rendered: str,
+    *,
+    zoom: int,
+    cols: int,
+    first_source_col: int = 1,
+) -> str:
+    """Prepend a column-number ruler line above the magnified output.
+
+    The ruler is a single line that mirrors the magnified viewport's
+    horizontal extent (exactly ``cols * zoom`` code points) and shows
+    the 1-based column index of each source column. For each source
+    column ``N`` (1-based, starting at ``first_source_col``), the
+    last digit of ``first_source_col + N - 1`` is repeated ``zoom``
+    times, then all columns are concatenated. The result is a
+    familiar editor-style ruler:
+
+        paw-zoom --col-ruler --cols 10 --zoom 2 '0123456789'
+
+    emits
+
+        1122334455667788990
+        00112233445566778899
+        00112233445566778899
+        ...
+        00112233445566778899
+
+    (the 10 magnified source columns are numbered 1..10 — the
+    ``first_source_col + N - 1`` formula shifts the numbering so
+    ``paw-zoom --col-ruler --col-offset 42 ...`` shows columns
+    43, 44, 45, ...).
+
+    The ruler is intentionally numeric-only: the last digit of
+    the column index is what the user can read at a glance, the
+    same convention ``vim`` / ``nano`` / ``less`` use. For
+    multi-digit column numbers the last digit is the only one
+    that fits in a single magnified cell, so this is the most
+    honest representation that doesn't require widening the
+    viewport.
+
+    Composes with :func:`_format_line_numbers` — the gutter sits
+    on the left of every line, the ruler sits above every line.
+    An empty ``rendered`` is a no-op (the ``--raw`` and the
+    no-frame case both rely on this), matching
+    :func:`_format_line_numbers`'s convention. A non-positive
+    ``zoom`` is treated defensively as ``1`` (the caller's
+    ``parse_args``-level check has already rejected ``--zoom 0``,
+    but the library function is callable from anywhere, so we
+    re-validate at the boundary).
+    """
+    if not rendered:
+        return rendered
+    if zoom < 1:
+        zoom = 1
+    width = cols * zoom
+    # ``str(index)[-1]`` extracts the last digit of the 1-based
+    # column index. For column 10 this yields "0", for column 11
+    # "1", etc. — the standard editor-ruler convention.
+    ruler_chars: list[str] = []
+    for n in range(cols):
+        col_index = first_source_col + n
+        digit = str(col_index)[-1]
+        ruler_chars.append(digit * zoom)
+    ruler = "".join(ruler_chars)
+    # Defensive: if the ruler is somehow shorter than the
+    # magnified width (should never happen with valid ``zoom`` /
+    # ``cols``), pad with spaces so the alignment with the
+    # viewport below is preserved. If it's longer, truncate
+    # (same convention ``less -N`` uses — show what fits,
+    # drop the rest).
+    if len(ruler) < width:
+        ruler = ruler + " " * (width - len(ruler))
+    elif len(ruler) > width:
+        ruler = ruler[:width]
+    return ruler + "\n" + rendered
+
+
 def render_viewport(source: str, cfg: ZoomConfig) -> str:
     """Render the magnified viewport for ``source`` under ``cfg``.
 
@@ -695,6 +772,7 @@ def _tail_and_render(
     time_fn=None,
     sink=None,
     line_numbers: bool = False,
+    col_ruler: bool = False,
 ) -> int:
     """Follow ``path`` and re-render the magnified viewport on each change.
 
@@ -828,10 +906,29 @@ def _tail_and_render(
             # accounts for ``--follow``'s per-frame
             # ``row_offset`` rewrite, so a tail-tracking live
             # view shows the right numbers as the source grows.
+            # Applied BEFORE --col-ruler so the gutter is added
+            # to the viewport lines only, not to the ruler line
+            # above them — the ruler then sits cleanly above
+            # the guttered lines.
             rendered = _format_line_numbers(
                 rendered,
                 zoom=frame_cfg.zoom,
                 first_source_row=max(1, frame_cfg.row_offset + 1),
+            )
+        if col_ruler:
+            # --col-ruler: per-frame, the first source column in
+            # view is ``frame_cfg.col_offset + 1`` (1-based, same
+            # as the one-shot path). The col_offset does not
+            # change between frames (only row_offset does, via
+            # ``--follow``), so the ruler is stable across frames
+            # of a tail-tracking live view. Applied AFTER
+            # --line-numbers so the ruler sits above the
+            # guttered lines.
+            rendered = _format_col_ruler(
+                rendered,
+                zoom=frame_cfg.zoom,
+                cols=frame_cfg.cols,
+                first_source_col=max(1, frame_cfg.col_offset + 1),
             )
         if sink is not None:
             sink(rendered)
@@ -861,6 +958,7 @@ def _tail_screen_and_render(
     capture_fn=None,
     has_changed=None,
     line_numbers: bool = False,
+    col_ruler: bool = False,
 ) -> int:
     """Follow a screen-capture adapter and re-render the magnified
     viewport on every change.
@@ -1019,11 +1117,29 @@ def _tail_screen_and_render(
             # ``frame_cfg`` already accounts for ``--follow``'s
             # per-frame rewrite, so a tail-tracking live screen
             # view shows the right numbers as the captured
-            # region grows.
+            # region grows. Applied BEFORE --col-ruler so the
+            # gutter is added to the viewport lines only, not to
+            # the ruler line above them — the ruler then sits
+            # cleanly above the guttered lines.
             rendered = _format_line_numbers(
                 rendered,
                 zoom=frame_cfg.zoom,
                 first_source_row=max(1, frame_cfg.row_offset + 1),
+            )
+        if col_ruler:
+            # --col-ruler: per-frame, the first source column in
+            # view is ``frame_cfg.col_offset + 1`` (1-based, same
+            # as the text-source tail and the one-shot path). The
+            # col_offset does not change between frames (only
+            # row_offset does, via ``--follow``), so the ruler is
+            # stable across frames of a tail-tracking live screen
+            # view. Applied AFTER --line-numbers so the ruler sits
+            # above the guttered lines.
+            rendered = _format_col_ruler(
+                rendered,
+                zoom=frame_cfg.zoom,
+                cols=frame_cfg.cols,
+                first_source_col=max(1, frame_cfg.col_offset + 1),
             )
         if sink is not None:
             sink(rendered)
@@ -1139,6 +1255,33 @@ def build_parser() -> argparse.ArgumentParser:
             "produce magnified output to annotate. The gutter does "
             "not count against --cols: the magnified viewport's "
             "horizontal extent is unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--col-ruler",
+        action="store_true",
+        dest="col_ruler",
+        help=(
+            "Prepend a column-number ruler line above the magnified "
+            "viewport (same shape as the ruler in 'vim' / 'nano' / "
+            "'less'). The ruler is exactly 'cols * zoom' code points "
+            "wide, matching the magnified viewport below; for each "
+            "source column N (1-based, starting at 'col_offset + 1') "
+            "it shows the last digit of N repeated 'zoom' times, so "
+            "'paw-zoom --col-ruler --cols 10 --zoom 2 ...' emits "
+            "'1122334455667788990\\n' above the magnified block. "
+            "Useful for correlating a magnified column with its "
+            "source position: 'which source column is this "
+            "magnified cell from?'. Composes with --line-numbers "
+            "(ruler on top, gutter on the left) and every "
+            "render-driving flag (--zoom / --rows / --cols / "
+            "--offset / --col-offset / --charset / --live / "
+            "--follow / --max-frames / --max-seconds / --snapshot); "
+            "ignored by the discovery flags (--list-backends, "
+            "--info, --size, --stats, --sha) and --raw, which never "
+            "produce magnified output to annotate. The ruler does "
+            "not count against --rows: the magnified viewport's "
+            "vertical extent is unchanged."
         ),
     )
     parser.add_argument(
@@ -1905,6 +2048,7 @@ def main(argv: list[str] | None = None) -> int:
                     max_seconds=args.max_seconds,
                     sink=_sink,
                     line_numbers=args.line_numbers,
+                    col_ruler=args.col_ruler,
                 )
                 return _tail_and_render(
                     args.file,
@@ -1915,6 +2059,7 @@ def main(argv: list[str] | None = None) -> int:
                     max_seconds=args.max_seconds,
                     sink=_sink,
                     line_numbers=args.line_numbers,
+                    col_ruler=args.col_ruler,
                 )
         except KeyboardInterrupt:
             # Ctrl-C is a clean exit in --live mode. Don't print
@@ -1936,10 +2081,33 @@ def main(argv: list[str] | None = None) -> int:
         # in view is ``cfg.row_offset + 1`` (1-based, matching
         # what `cat -n` would print); the gutter is added on
         # top of the rendered viewport so the magnified width
-        # is unchanged.
+        # is unchanged. Applied BEFORE --col-ruler so the gutter
+        # is added to the viewport lines only, not to the ruler
+        # line above them — the ruler then sits cleanly above
+        # the guttered lines (top → ruler; below → guttered
+        # viewport). If --col-ruler ran first, the ruler would
+        # itself get a "1 │ " gutter prefix, which would break
+        # the visual alignment.
         first_row = max(1, cfg.row_offset + 1)
         rendered = _format_line_numbers(
             rendered, zoom=cfg.zoom, first_source_row=first_row
+        )
+    if args.col_ruler:
+        # --col-ruler: prepend a 1-line column-number ruler above the
+        # (now guttered) magnified viewport. The ruler mirrors the
+        # magnified width (cols * zoom code points) and shows the
+        # last digit of each source column index, repeated ``zoom``
+        # times. The first source column in view is ``cfg.col_offset
+        # + 1`` (1-based, matching the --line-numbers convention for
+        # rows). Applied AFTER --line-numbers so the ruler sits
+        # cleanly above the guttered lines (top → ruler; below →
+        # guttered viewport).
+        first_col = max(1, cfg.col_offset + 1)
+        rendered = _format_col_ruler(
+            rendered,
+            zoom=cfg.zoom,
+            cols=cfg.cols,
+            first_source_col=first_col,
         )
     if args.snapshot is not None:
         try:

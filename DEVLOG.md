@@ -2300,3 +2300,148 @@ the screen-magnifier overlay UX (the
 "wait-for-keypress-then-exit" one-tick piece), or the
 shared `to_json()` / describe helper refactor (a refactor
 across modules, deferred unless someone asks).
+
+---
+
+## 2026-09-21 — `--col-ruler` for `paw-zoom`
+
+The natural sibling of `--line-numbers`: a column-number
+ruler that sits above the magnified viewport, so the user
+can correlate a magnified column with its source position
+("which source column is this magnified cell from?").
+
+- **What it is.** A single horizontal line emitted above
+  the magnified viewport, exactly `cols * zoom` code points
+  wide (matching the magnified viewport below it). For
+  each source column `N` (1-based, starting at
+  `col_offset + 1`) it shows the *last digit* of `N`
+  repeated `zoom` times — the standard editor-ruler
+  convention (`vim` / `nano` / `less` use the same shape,
+  because the last digit is the only thing that fits in a
+  single magnified cell when `N` is multi-digit). A
+  `paw-zoom --col-ruler --cols 10 --zoom 2 ...` emits
+  `11223344556677889900\n` above the magnified block; a
+  `paw-zoom --col-ruler --col-offset 12 ...` shows the
+  digits of columns 13, 14, 15 (`345\n`).
+
+- **Why a *column* ruler on top, not a *row* ruler on the
+  left?** Because `--line-numbers` already provides the
+  per-row gutter on the left. The two flags together
+  form a "spreadsheet view" of the magnified block:
+  column numbers on top, row numbers on the left,
+  magnified text in the middle. The composition
+  deliberately applies `--line-numbers` *first* (so the
+  gutter prefixes only the viewport lines) and then
+  `--col-ruler` (so the ruler sits cleanly above the
+  guttered lines, not behind a spurious `1 │ ` prefix).
+  Together they answer both correlation questions
+  simultaneously: "which source line is this row from?"
+  (left) + "which source column is this cell from?" (top).
+
+- **Why "last digit" and not the full column number?**
+  Because the magnified viewport is `cols * zoom` code
+  points wide and a multi-digit column number would
+  overflow a single magnified cell. `less -N`, `vim`'s
+  `:set number`, and `nano`'s ruler all use the same
+  convention for the same reason. The user can still
+  infer the actual column index from context (the digits
+  are 1-based, and `paw-zoom --col-offset N ...` shifts
+  the starting column, so a user who knows their offset
+  can compute the absolute column).
+
+- **What I added.**
+  - **Helper.** `whisperpaw.zoom._format_col_ruler` —
+    pure function that takes a rendered viewport string,
+    the `zoom`, the `cols`, and an optional
+    `first_source_col`, and returns the same string with
+    a ruler line prepended. Empty `rendered` is a no-op
+    (the `--raw` and the no-frame case both rely on
+    this), matching `_format_line_numbers`'s convention.
+    A non-positive `zoom` is treated defensively as `1`
+    (the caller's `parse_args`-level check has already
+    rejected `--zoom 0`, but the library function is
+    callable from anywhere, so we re-validate at the
+    boundary).
+  - **CLI flag.** `--col-ruler` (a `store_true`
+    `dest="col_ruler"`, default off so vanilla
+    `paw-zoom …` keeps its current output shape). The
+    help text is verbose on purpose — it spells out the
+    shape, the width invariant, the composition with
+    `--line-numbers`, the silent-ignore-on-discovery
+    convention, and the same `--rows`-is-unchanged
+    caveat the gutter's help text carries.
+  - **Wiring.** The flag is a *render-time* annotation,
+    so it threads through the same three sites
+    `--line-numbers` threads through: the one-shot
+    render in `main()` (after `render_viewport()`, before
+    the `--snapshot` write), the text-source tail in
+    `_tail_and_render` (per-frame, after the
+    `frame_cfg` rewrite), and the screen-capture tail
+    in `_tail_screen_and_render` (per-frame, same
+    position). `--col-ruler` runs *after*
+    `--line-numbers` in all three sites so the ruler
+    sits cleanly above the guttered lines, not behind
+    a spurious gutter prefix.
+  - **Discovery silent.** Like `--line-numbers`,
+    `--col-ruler` is silently ignored on every
+    discovery flag (`--list-backends`, `--info`,
+    `--size`, `--stats`, `--sha`) and on `--raw` —
+    none of them produce magnified output to
+    annotate, and silently stripping the flag is the
+    same convention the gutter uses.
+
+- **Tests.** 18 new tests in `tests/test_zoom.py`:
+  - 7 `_format_col_ruler` low-level tests (basic /
+    empty / zoom-2 / offset / zoom-1-offset /
+    multi-digit-columns / defensive-zoom covering both
+    `zoom=0` and `zoom=-1`).
+  - 2 `parse_args` tests (default-off / flagged).
+  - 7 `main()` end-to-end tests (render-with-ruler /
+    zoom-2-repeats-digit / offset-shifts-numbering /
+    off-by-default / quiet-still-emits-ruler /
+    composes-with-line-numbers / discovery-silent).
+  - 1 `--follow` integration test proving the ruler
+    stays stable across frames (the col_offset does
+    not change between frames — only the row_offset
+    does, via `--follow` — so the ruler is the same
+    on every frame of a tail-tracking live view).
+  - 1 help-text regression guard (`--col-ruler`
+    appears in `format_help()`).
+
+- **Bookkeeping.** Regenerated all four static shell-
+  completion files (`completions/whisperpaw.{bash,zsh,fish,nu}`)
+  so `--col-ruler` shows up in Tab completion for every
+  shell. The byte-identity test in
+  `tests/test_completions.py` caught the drift and forced
+  the regen, as it has for every prior tick. The
+  `ROADMAP.md` got a new design section ("`--col-ruler`
+  is the *column-number companion* of `--line-numbers`")
+  and a tick-log entry; the `paw-zoom` CLI signature
+  summary in the design section picked up the new flag.
+
+- **Total: 708/708 green** (18 new + 690 existing). Pure
+  stdlib, no new pip deps, no telemetry, no network. The
+  new helper lives next to `_format_line_numbers` in
+  `whisperpaw/zoom.py` so the render-time public surface
+  stays co-located.
+
+**Next tick.** With `--col-ruler` shipped, both
+correlation axes are covered — the user can now ask
+"which source line?" (left, `--line-numbers`) and
+"which source column?" (top, `--col-ruler`) — and the
+render surface has the standard five annotation
+affordances any magnifier is expected to ship: shape
+control (`--zoom` / `--rows` / `--cols` / `--offset` /
+`--col-offset` / `--charset`), live control
+(`--live` / `--follow` / `--max-frames` / `--max-seconds`),
+output (`--snapshot` / `--raw` / `--quiet`), and now
+correlation (`--line-numbers` / `--col-ruler`). The
+discovery surface (`--list-backends` / `--info` /
+`--size` / `--stats` / `--sha`) is also complete; the
+next genuinely useful behaviour change is either a
+fourth sound pack for `paw-sound` (still needs a user
+request), a small slice of the screen-magnifier
+overlay UX (the "wait-for-keypress-then-exit" one-tick
+piece), or the shared `to_json()` / describe helper
+refactor (a refactor across modules, deferred unless
+someone asks).

@@ -207,7 +207,7 @@ CLI: ``paw-zoom [TEXT] [--file PATH] [--rows N] [--cols N]
 [--max-seconds SECS] [--raw]
 [--screen] [--region X,Y,W,H] [--backend {auto,fake,x11,win32,quartz}]
 [--fake-grid TEXT] [--list-backends] [--info] [--size]
-[--stats] [--sha] [--sha-algo NAME] [--json]``.
+[--stats] [--sha] [--sha-algo NAME] [--col-ruler] [--json]``.
 
 Exit codes: 0 ok, 1 ``--file`` not found, 2 usage / no source /
 invalid args.
@@ -426,6 +426,73 @@ a clear error instead of the generic
 ``ValueError: unsupported hash type`` traceback that
 :func:`hashlib.new` would emit.
 
+``--col-ruler`` is the *column-number companion* of
+``--line-numbers``: it prepends a single horizontal
+ruler line above the magnified viewport, so the
+user can correlate a magnified column with its
+source position ("which source column is this
+magnified cell from?"). The natural sibling of the
+existing per-row gutter — gutter on the left for
+rows, ruler on top for columns — they compose
+cleanly, giving the user a "spreadsheet view" of
+the magnified block: column numbers on top, row
+numbers on the left, magnified text in the middle.
+
+The ruler is exactly ``cols * zoom`` code points
+wide (matching the magnified viewport below it),
+so it always lines up with the cells underneath.
+For each source column ``N`` (1-based, starting at
+``col_offset + 1``), it shows the *last digit* of
+``N`` repeated ``zoom`` times — the standard
+editor-ruler convention (``vim`` / ``nano`` /
+``less`` use the same shape, because the last
+digit is the only thing that fits in a single
+magnified cell when ``N`` is multi-digit). A
+``paw-zoom --col-ruler --cols 10 --zoom 2 ...``
+emits ``11223344556677889900\n`` above the
+magnified block; ``paw-zoom --col-ruler --col-offset
+12 ...`` shows the digits of columns 13, 14, 15
+(``345\n``).
+
+The flag is a *render-time* annotation, so it
+composes with every render-driving flag
+(``--zoom`` / ``--rows`` / ``--cols`` / ``--offset``
+/ ``--col-offset`` / ``--charset`` / ``--live`` /
+``--follow`` / ``--max-frames`` / ``--max-seconds``
+/ ``--snapshot``) and is silently ignored by the
+discovery flags (``--list-backends``, ``--info``,
+``--size``, ``--stats``, ``--sha``) and ``--raw``,
+which never produce magnified output to annotate.
+It also composes with ``--line-numbers`` — the
+ruler sits above the guttered viewport — by
+applying ``--line-numbers`` *first* (so the gutter
+prefixes only the viewport lines) and then
+``--col-ruler`` (so the ruler sits cleanly above
+the guttered lines, not behind a spurious gutter
+prefix). The ruler does not count against ``--rows``:
+the magnified viewport's vertical extent is
+unchanged.
+
+The derivation lives in a pure helper
+:func:`whisperpaw.zoom._format_col_ruler` (one
+input, one output, no globals): it computes
+``width = cols * zoom``, walks the source columns,
+extracts ``str(col_index)[-1]`` for each, and
+concatenates ``digit * zoom`` into the ruler. The
+``first_source_col`` kwarg is the injection point
+so tests can exercise the offset-shift path
+without going through the CLI. Empty ``rendered``
+is a no-op (the ``--raw`` and the no-frame case
+both rely on this), matching
+:func:`_format_line_numbers`'s convention; a
+non-positive ``zoom`` is treated defensively as
+``1`` (the caller's ``parse_args``-level check has
+already rejected ``--zoom 0``). The ``col_offset``
+shift is clamped to ``1`` via the same
+``max(1, cfg.col_offset + 1)`` idiom the existing
+``row_offset`` path uses, so a stray negative
+``--col-offset`` never produces a "0 │ ..." prefix.
+
 ### `paw-zoom` v0.2 (screen-capture adapter skeleton)
 
 v0.2 adds the **screen-capture seam** without yet shipping real
@@ -638,6 +705,7 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-20 — paw-zoom: add `--sha` flag (source-fingerprint discovery). The stable-hash companion of --size and --stats: --size answers "how big is the source as a rectangle?"; --stats answers "what is in the source?"; --sha answers "is this the same source I saw last time?". New public helpers in `whisperpaw.zoom`: `DEFAULT_SHA_ALGORITHM = "sha256"` constant (single source of truth for the help text, the JSON key, and the underlying `hashlib` call), `_source_sha(source, *, algorithm=DEFAULT_SHA_ALGORITHM)` (UTF-8-encodes the source, hashes it, returns the lowercase hex digest; raises `ValueError` on an unsupported algorithm so the parse_args() path can re-emit it as a clean exit-2), `_sha_to_text(digest)` (single-line bare-digest rendering), `_sha_to_json(digest, *, algorithm)` (single-line `{"algorithm": "sha256", "sha256": "..."}` with sorted keys + `ensure_ascii=False`; the digest key reflects the algorithm so a SHA-1 digest is keyed `"sha1"` and a downstream consumer can branch on family without re-reading the `algorithm` field). New CLI flag `--sha-algo NAME` picks the digest family (any `hashlib` algorithm — md5 / sha1 / sha256 / sha512 / blake2b / ...; an unknown name is caught at parse time, not at render time). The CLI flag works for all three source-resolution paths (positional, --file, --screen with --backend/--region/--fake-grid), short-circuits at the same point --size and --stats do (after source resolution, before the render / --raw block), and is mutually exclusive with --size / --stats / --info / --live / --follow / --max-frames / --snapshot / --raw / --list-backends (exit 2 with a clear stderr message naming both flags). The mutual-exclusion check is ordered AFTER --size's and --stats's so the contradiction message from the earlier-discovered flag wins when more than one discovery flag would fire. --json composes with --sha → `{"algorithm": "sha256", "sha256": "..."}`. 43 new tests in test_zoom.py (7 _source_sha low-level tests covering empty / known-value / UTF-8 multibyte / determinism / algorithm-override / unknown-raises / default-is-sha256; 4 _sha_to_text / _sha_to_json tests covering format / round-trip / algorithm-key-reflects-input / key-sort / ensure-ascii; 4 parse_args tests covering default-off / flag-on / --sha-algo-override / --sha-algo-unknown-is-usage-error; 19 main() end-to-end tests covering positional / --file / --file-missing / --screen fake / --screen fake --json / --screen x11-headless / no-source / 8 mutual-exclusion rejections including --size-wins-on-tie / --sha-algo-md5 / --sha-algo-sha1 --json / avalanche-on-one-char-change / empty-source / --json-composes / help-text-mentions-flag / default-algo-appears-in-help). 660/660 green. Static completion files regenerated so --sha and --sha-algo show up in Tab completion.
 - 2026-09-20 — paw-zoom: add `--max-seconds SECS` flag (wall-clock cap on `--live`). The natural companion of `--max-frames`: `--max-frames` caps the loop at N iterations, `--max-seconds` caps it at N wall-clock seconds. Useful for scripts that want "watch the live log for 30s, then exit" without having to estimate the iteration count in advance. Composes with `--max-frames` (whichever cap fires first wins), `--follow`, `--snapshot`, and `--interval` — the same composition matrix the iteration cap has. New public helper `_max_seconds_exceeded(start, max_seconds, now)` (pure, `(now - start) >= max_seconds`, with `max_seconds <= 0` short-circuiting to "no cap") plus a `time_fn` injection point (default `time.monotonic`, immune to NTP slews) on both `_tail_and_render` and `_tail_screen_and_render`. Parse-time validation: a negative value is exit 2 with a clear stderr message; zero (the default) is the "unlimited" sentinel. Has no effect without `--live` — the one-shot render always emits exactly one frame, same convention as `--max-frames`. 13 new tests in test_zoom.py (4 `_max_seconds_exceeded` low-level tests covering zero-means-unlimited / within-window / at-boundary / non-zero-start; 3 `_tail_and_render` integration tests covering the cap actually firing / zero-is-unlimited / composes-with-max-frames via a fake `time_fn`; 3 `parse_args` tests covering default-zero / flagged / negative-is-exit-2; 1 help-text test; 2 `main()` end-to-end tests covering live-with-cap / without-live-is-noop). 673/673 green. Static completion files regenerated (--max-seconds shows up in Tab completion for every shell).
 - 2026-09-20 — paw-zoom: add `--line-numbers` flag. The per-source-row gutter annotation: prefixes each magnified source row with its 1-based row number in a 4-char right-aligned column + ` | ` gutter (same shape as `cat -n` / `nl` / most editors). The first number is `cfg.row_offset + 1`, so `paw-zoom --offset 12 --line-numbers …` produces gutters starting at `13`; the gutter tracks the source's actual line numbers as `--follow` / `--live` re-derive the offset per frame. Useful for correlating a magnified block with its source: "which source line is this magnified row from?" The flag is a *render-time* annotation: it composes with every render-driving flag (--zoom / --rows / --cols / --offset / --col-offset / --charset / --live / --follow / --max-frames / --max-seconds / --snapshot) and is silently ignored by the discovery flags (--list-backends, --info, --size, --stats, --sha) and --raw, which never produce magnified output to annotate. New public helper `_format_line_numbers(rendered, *, zoom, first_source_row, width=4, gutter=" │ ")` is pure: it groups `rendered` into `zoom`-sized chunks (one chunk per source row), prepends `f"{row:>{width}}{gutter}"` to every line in the group, and is `width` / `gutter` overridable for tighter or looser gutters. Empty `rendered` is a no-op (the `--raw` and the no-frame case both rely on this); a non-positive `zoom` falls back to per-line numbering as a defensive boundary check. 17 new tests in test_zoom.py (8 `_format_line_numbers` low-level tests covering basic / empty / zoom-1 / offset-shift / custom-width / defensive-zoom / negative-first-row / `gutter=" │ "` default; 2 `parse_args` tests covering default-off / flagged; 6 `main()` end-to-end tests covering render-with-gutter / offset-shifts-numbering / zoom-2-repeats-number / announcement-still-fires / off-by-default / quiet-still-emits-gutter; 1 follow integration test proving the gutter tracks the tail of a live file; 1 help-text regression guard). 690/690 green. Static completion files regenerated (--line-numbers shows up in Tab completion for every shell).
+- 2026-09-21 — paw-zoom: add `--col-ruler` flag. The column-number companion of `--line-numbers`: prepends a 1-line ruler above the magnified viewport (same shape as the ruler in `vim` / `nano` / `less`), so the user can correlate a magnified column with its source position. The ruler is exactly `cols * zoom` code points wide (matching the magnified viewport below it), and shows the *last digit* of each source column index repeated `zoom` times — the standard editor-ruler convention. The first source column in view is `col_offset + 1` (1-based, matching the `--line-numbers` convention for rows); `--col-offset` is clamped to `1` via the same `max(1, cfg.col_offset + 1)` idiom the existing `row_offset` path uses. Composes with every render-driving flag (--zoom / --rows / --cols / --offset / --col-offset / --charset / --live / --follow / --max-frames / --max-seconds / --snapshot) and is silently ignored by the discovery flags (--list-backends, --info, --size, --stats, --sha) and --raw, which never produce magnified output to annotate. Composes with `--line-numbers` by applying `--line-numbers` *first* (so the gutter prefixes only the viewport lines) and then `--col-ruler` (so the ruler sits cleanly above the guttered lines, not behind a spurious gutter prefix) — together they form a "spreadsheet view" of the magnified block. The ruler does not count against `--rows`: the magnified viewport's vertical extent is unchanged. New public helper `_format_col_ruler(rendered, *, zoom, cols, first_source_col=1)` is pure: it walks the source columns, extracts `str(col_index)[-1]` for each, concatenates `digit * zoom` into the ruler, and pads / truncates defensively to `cols * zoom` code points. Empty `rendered` is a no-op (the `--raw` and the no-frame case both rely on this), matching `_format_line_numbers`'s convention; a non-positive `zoom` is treated defensively as `1`; the `first_source_col` kwarg is the injection point so tests can exercise the offset-shift path without going through the CLI. 18 new tests in test_zoom.py (7 `_format_col_ruler` low-level tests covering basic / empty / zoom-2 / offset / zoom-1-offset / multi-digit-columns / defensive-zoom; 2 `parse_args` tests covering default-off / flagged; 7 `main()` end-to-end tests covering render-with-ruler / zoom-2-repeats-digit / offset-shifts-numbering / off-by-default / quiet-still-emits-ruler / composes-with-line-numbers / discovery-silent; 1 follow integration test proving the ruler stays stable across frames; 1 help-text regression guard). 708/708 green. Static completion files regenerated (--col-ruler shows up in Tab completion for every shell).
 <!-- TICK-LOG-END -->
 
 (Updated 2026-09-17: `paw-zoom` v0.2 ships the screen-capture

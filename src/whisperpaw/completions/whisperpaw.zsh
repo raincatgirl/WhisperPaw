@@ -66,6 +66,7 @@ _paw_zoom() {
     '--zoom[Magnification factor: each source cell becomes a --zoom×--zoom block (default:…]' \
     '--charset[Fill character for empty cells: ''space'' (default, invisible), ''hash'' (#), or ''d…]' \
     '--line-numbers[Prefix each magnified source row with its 1-based row number (right-aligned in…]' \
+    '--col-ruler[Prepend a column-number ruler line above the magnified viewport (same shape as…]' \
     '--quiet[Suppress the announcement line (still renders).]' \
     '--snapshot[Write the rendered viewport to PATH instead of stdout.]' \
     '--live[Follow the source like ''tail -f'': re-render the magnified viewport every time i…]' \

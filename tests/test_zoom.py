@@ -3546,3 +3546,403 @@ def test_help_text_mentions_line_numbers() -> None:
     accidental rename of the flag."""
     help_text = zoom.build_parser().format_help()
     assert "--line-numbers" in help_text
+
+
+def test_main_col_ruler_follow_stable_per_frame(
+    tmp_path, capsys
+) -> None:
+    """``--follow --col-ruler`` keeps the ruler
+    stable across frames (the col_offset does not
+    change between frames — only the row_offset does,
+    via ``--follow``). The end-to-end guarantee is:
+    a tail-tracking live magnifier always shows the
+    same column ruler on every frame, regardless
+    of which source rows are currently in view.
+    """
+    src = tmp_path / "log.txt"
+    src.write_text("line1\nline2\n", encoding="utf-8")
+    rc = zoom.main(
+        [
+            "--quiet",
+            "--col-ruler",
+            "--follow",
+            "--max-frames",
+            "1",
+            "--file",
+            str(src),
+            "--rows",
+            "1",
+            "--cols",
+            "5",
+            "--zoom",
+            "1",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    # --cols 5 → ruler "12345" (last digit of each
+    # source column 1..5). The ruler is on the
+    # first line of the captured frame.
+    assert "12345" in out.out
+    # And the magnified line below is "line2"
+    # (because --follow tracks the tail).
+    assert "line2" in out.out
+
+
+# ---------------------------------------------------------------------------
+# --col-ruler (column-number ruler)
+# ---------------------------------------------------------------------------
+#
+# ``--col-ruler`` prepends a single horizontal line above the magnified
+# viewport showing the 1-based column index of each source column. The
+# ruler mirrors the magnified width (cols * zoom code points) and shows
+# the last digit of each column's index, repeated ``zoom`` times. This
+# is the natural sibling of ``--line-numbers``: gutter on the left for
+# rows, ruler on top for columns. The two flags compose — both can be
+# on the same invocation.
+
+
+def test_format_col_ruler_basic() -> None:
+    """``_format_col_ruler`` prepends a 1-line ruler above the
+    magnified output. For a 3-column source at ``zoom=1`` the
+    ruler is ``"123"``; the magnified line below it stays
+    unchanged. The helper is pure: it doesn't know about the
+    renderer, the source, or the CLI — it just splices a
+    ruler line onto whatever string you give it.
+    """
+    rendered = "abc"
+    out = zoom._format_col_ruler(rendered, zoom=1, cols=3)
+    assert out == "123\nabc"
+
+
+def test_format_col_ruler_empty() -> None:
+    """An empty ``rendered`` is a no-op — returns ``""``
+    unchanged. The ``--raw`` and the no-frame case both rely
+    on this; if the helper ever started padding the empty
+    string with a ruler, both code paths would gain a
+    spurious leading line.
+    """
+    assert (
+        zoom._format_col_ruler("", zoom=1, cols=3) == ""
+    )
+    assert (
+        zoom._format_col_ruler("", zoom=2, cols=10) == ""
+    )
+
+
+def test_format_col_ruler_zoom_2() -> None:
+    """At ``zoom=2`` each source column occupies 2 code
+    points in the ruler. A 10-column source at ``zoom=2``
+    produces a 20-char ruler: ``11223344556677889900`` —
+    each column's last digit repeated twice, with column
+    10's last digit (``0``) repeated twice (``00``). The
+    total ruler length always equals ``cols * zoom`` so it
+    aligns with the magnified viewport below.
+    """
+    rendered = "abcdefghij" * 2
+    out = zoom._format_col_ruler(rendered, zoom=2, cols=10)
+    assert out == "11223344556677889900\n" + rendered
+
+
+def test_format_col_ruler_offset() -> None:
+    """``first_source_col`` shifts the numbering. A
+    3-column viewport starting at source column 43 shows
+    the digits of 43, 44, 45 (last digits: ``3``, ``4``,
+    ``5``). The first source column in view is
+    ``first_source_col`` (1-based), matching what
+    ``--col-offset 42`` would put in the viewport.
+    """
+    out = zoom._format_col_ruler(
+        "abc", zoom=1, cols=3, first_source_col=43
+    )
+    assert out == "345\nabc"
+
+
+def test_format_col_ruler_zoom_1_offset() -> None:
+    """``zoom=1`` with an offset. The ruler is the
+    literal last-digit of each source column index —
+    one character per source column. Useful for
+    confirming the ``first_source_col`` shift in the
+    minimum-width case.
+    """
+    out = zoom._format_col_ruler(
+        "xyz", zoom=1, cols=3, first_source_col=11
+    )
+    # Source columns 11, 12, 13 → last digits "1", "2", "3".
+    assert out == "123\nxyz"
+
+
+def test_format_col_ruler_multi_digit_columns() -> None:
+    """Multi-digit column indices show only their last
+    digit (the only thing that fits in a single
+    magnified cell). Columns 9-13 show ``9``, ``0``,
+    ``1``, ``2``, ``3`` — the editor-ruler convention.
+    """
+    out = zoom._format_col_ruler(
+        "abcdefghijklm", zoom=1, cols=13, first_source_col=1
+    )
+    # Columns 1-9 → "123456789"; columns 10-13 → "0123".
+    assert out == "1234567890123\nabcdefghijklm"
+
+
+def test_format_col_ruler_defensive_zoom() -> None:
+    """A non-positive ``zoom`` is treated as ``1`` (the
+    parse_args-level check has already rejected ``--zoom 0``,
+    but the library function is callable from anywhere, so
+    we re-validate at the boundary). This matches
+    ``_format_line_numbers``'s defensive-zoom convention:
+    a stray invalid input still produces a sensible ruler.
+    """
+    out = zoom._format_col_ruler(
+        "abc", zoom=0, cols=3
+    )
+    assert out == "123\nabc"
+    out = zoom._format_col_ruler(
+        "abc", zoom=-1, cols=3
+    )
+    assert out == "123\nabc"
+
+
+def test_parse_args_col_ruler_default_off() -> None:
+    """``--col-ruler`` defaults to ``False`` so a
+    vanilla ``paw-zoom …`` keeps its current output
+    shape — no ruler, no behaviour change for users
+    who didn't ask for the annotation.
+    """
+    args = zoom.parse_args(["hello"])
+    assert args.col_ruler is False
+
+
+def test_parse_args_col_ruler_flag() -> None:
+    """``--col-ruler`` is a ``store_true`` flag —
+    passing it once flips the attribute to ``True``.
+    """
+    args = zoom.parse_args(["--col-ruler", "hello"])
+    assert args.col_ruler is True
+
+
+def test_main_col_ruler_renders_with_ruler(capsys) -> None:
+    """End-to-end: ``paw-zoom --col-ruler …`` emits a
+    magnified viewport with a column-number ruler on
+    top. With ``--cols 3 --zoom 1`` the ruler is
+    ``"123"``; the magnified line below it is the
+    source verbatim. The default off-by-default
+    behaviour is unchanged for users who don't pass
+    the flag.
+    """
+    rc = zoom.main(
+        [
+            "--rows",
+            "1",
+            "--cols",
+            "3",
+            "--zoom",
+            "1",
+            "--col-ruler",
+            "abc",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    lines = out.out.splitlines()
+    # Drop the announcement line.
+    assert lines[0].startswith("🐾 paw-zoom:")
+    assert lines[1:] == [
+        "123",
+        "abc",
+    ]
+
+
+def test_main_col_ruler_zoom_2_repeats_digit(capsys) -> None:
+    """With ``--zoom 2``, each source column occupies
+    2 code points in the ruler. A 4-column source at
+    ``zoom=2`` with ``--rows 1`` produces an 8-char
+    ruler above a 2-line viewport, each line being
+    the magnified source row. The composition with
+    --zoom works the same way _format_col_ruler says
+    it does in its docstring.
+    """
+    rc = zoom.main(
+        [
+            "--rows",
+            "1",
+            "--cols",
+            "4",
+            "--zoom",
+            "2",
+            "--col-ruler",
+            "abcd",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    lines = out.out.splitlines()
+    assert lines[0].startswith("🐾 paw-zoom:")
+    # Ruler on top, then the 2 magnified lines below.
+    assert lines[1:] == [
+        "11223344",
+        "aabbccdd",
+        "aabbccdd",
+    ]
+
+
+def test_main_col_ruler_offset_shifts_numbering(capsys) -> None:
+    """``--col-ruler`` combined with ``--col-offset N``:
+    the first source column in view is ``N + 1``
+    (1-based), so the ruler numbers start at that
+    value. We need a source long enough that
+    ``--col-offset 12`` doesn't fall off the edge —
+    otherwise the renderer pads with spaces and the
+    ruler's column 13 would still show correctly,
+    but the magnified viewport would be all blanks.
+    Same source (15 chars), two different
+    col-offsets, two different ruler numbering
+    series — the user can correlate the magnified
+    column with its source position.
+    """
+    src = "abcdefghijklmno"  # 15 columns, plenty for --col-offset 12.
+    rc = zoom.main(
+        [
+            "--rows",
+            "1",
+            "--cols",
+            "3",
+            "--zoom",
+            "1",
+            "--col-offset",
+            "12",
+            "--col-ruler",
+            src,
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    lines = out.out.splitlines()
+    assert lines[0].startswith("🐾 paw-zoom:")
+    # Col-offset 12 → first source column 13 → ruler "345";
+    # the 3 columns of the source starting at index 12 are
+    # "mno" (m=col 13, n=col 14, o=col 15).
+    assert lines[1:] == [
+        "345",
+        "mno",
+    ]
+
+
+def test_main_col_ruler_off_by_default(capsys) -> None:
+    """Without ``--col-ruler``, the rendered output
+    has no ruler — the default behaviour is unchanged.
+    Regression guard against an accidental
+    flip-the-default mistake.
+    """
+    rc = zoom.main(
+        ["--rows", "1", "--cols", "3", "--zoom", "1", "abc"]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    # The rendered line is the literal source — no
+    # "123" prefix.
+    assert "abc" in out.out
+    assert "123" not in out.out
+
+
+def test_main_col_ruler_quiet_still_emits_ruler(capsys) -> None:
+    """``--quiet`` suppresses the *announcement* line,
+    not the ruler. The ruler is part of the rendered
+    output, not the announcement — so
+    ``--quiet --col-ruler`` still emits the
+    ruler-prefixed viewport. (Quiet + col-ruler is
+    the canonical "clean pipe" invocation: render the
+    ruler-prefixed block to stdout, nothing else.)
+    """
+    rc = zoom.main(
+        [
+            "--quiet",
+            "--rows",
+            "1",
+            "--cols",
+            "3",
+            "--zoom",
+            "1",
+            "--col-ruler",
+            "abc",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    # No announcement.
+    assert "window" not in out.out
+    # The ruler is on stdout.
+    assert "123\nabc" in out.out
+
+
+def test_main_col_ruler_composes_with_line_numbers(capsys) -> None:
+    """``--col-ruler`` and ``--line-numbers`` are
+    orthogonal render-time annotations and compose
+    cleanly: the ruler sits above every line, the
+    gutter sits on the left of every line. The
+    combination gives the user a "spreadsheet view"
+    of the magnified block — column numbers on top,
+    row numbers on the left, magnified text in the
+    middle. The two helpers splice onto the
+    rendered string in a fixed order (ruler first,
+    then gutter) so the output is deterministic.
+    """
+    rc = zoom.main(
+        [
+            "--rows",
+            "2",
+            "--cols",
+            "3",
+            "--zoom",
+            "1",
+            "--line-numbers",
+            "--col-ruler",
+            "abc\ndef",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    lines = out.out.splitlines()
+    assert lines[0].startswith("🐾 paw-zoom:")
+    # Ruler on top, then the guttered viewport.
+    assert lines[1:] == [
+        "123",
+        "   1 │ abc",
+        "   2 │ def",
+    ]
+
+
+def test_main_col_ruler_discovery_silent(capsys) -> None:
+    """``--col-ruler`` is a *render-time* annotation;
+    the discovery flags (--list-backends, --info,
+    --size, --stats, --sha) and --raw short-circuit
+    before any render, so a stray ``--col-ruler`` on
+    an invocation that will never produce a
+    magnified output is silently ignored. This
+    matches ``--line-numbers``'s discovery-silent
+    convention.
+    """
+    rc = zoom.main(
+        [
+            "--col-ruler",
+            "--list-backends",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    # --list-backends prints the backends — no ruler.
+    assert out.out.strip() == "\n".join(
+        ["fake", "x11", "win32", "quartz"]
+    )
+    # And the ruler does not appear anywhere.
+    assert "123" not in out.out
+
+
+def test_help_text_mentions_col_ruler() -> None:
+    """``--col-ruler`` is in the ``--help`` output
+    so a user who hits ``paw-zoom --help`` can
+    find it. Regression guard against an
+    accidental rename of the flag.
+    """
+    help_text = zoom.build_parser().format_help()
+    assert "--col-ruler" in help_text
