@@ -2706,3 +2706,95 @@ prints the *chained* discovery story in one shot
 words=312, sha256=…") for a CI artefact. None of
 those is ready today; will pick based on what the user
 actually needs next.
+
+---
+
+## 2026-09-22 — paw-watch: `--transcript PATH` (accessibility log)
+
+**What.** New `--transcript PATH` flag on `paw-watch`. For every
+line that is spoken (or, with `--dry-run`, that would have been
+spoken) the same string is also written to PATH, one line per
+row, UTF-8, opened in **append mode**.
+
+**Why.** A blind user running `paw-watch --follow` against
+`make watch` or `tail -f` has no way to revisit what the
+screen reader announced — a fleeting sentence disappears
+the instant it stops being spoken. `--transcript` leaves a
+real-time, tail-able record behind, which doubles as:
+
+- a personal session log
+  (`--transcript ~/.local/share/whisperpaw/session.log`)
+- an audit trail of what the user *was* told when
+- a way to grep past announcements
+
+Append mode means two `paw-watch` invocations against the
+same file concatenate, so a daily-roll session log just
+works.
+
+**How.** Three new public helpers in `whisperpaw.watch`:
+
+- `_validate_transcript_path(path)` — parent-dir-exists
+  check at parse time, exit 2 on miss
+- `open_transcript(path)` — opens the file
+  (`"a"`, `encoding="utf-8"`, `newline=""`) or returns
+  `None`
+- `_transcript_writer(fh)` — closure that writes
+  `line + "\n"` and flushes after every line
+
+`_emit_line` got a new `transcript_write` keyword
+(`callable[[str], None]` or `None`) so the batch and
+streaming paths share one write contract. The closure is
+called *before* the TTS chain so a TTS failure can't drop
+a line from the log. A failed write is loud on stderr but
+does NOT change the exit code (the spoken/printed output
+is the source of truth).
+
+`main()` was split into `main` (owns the transcript handle
+and the `try/finally` close) + `_run` (banner + dispatch)
++ `_run_batch` + `_run_streaming` so both modes close the
+handle the same way and a `KeyboardInterrupt` mid-loop
+can't leak an unflushed file descriptor.
+
+**Tests.** 17 new tests in `tests/test_watch.py`:
+- parse: default `None` / accepts path / rejects missing
+  parent dir
+- `open_transcript`: returns `None` for `None` / creates
+  the file / appends to an existing one
+- `_transcript_writer`: returns `None` for `None` handle
+  / writes `line + "\n"` and flushes
+- `_emit_line`: writes before speaking / write failure
+  doesn't change exit code
+- `main` end-to-end: speaks-and-writes / dry-run-and-
+  writes / respects `--max-lines` / appends across two
+  runs / `--follow` writes each streamed line / closes
+  handle on TTS error / directory-as-path exits 2
+
+**Bookkeeping.** Regenerated all four static shell-
+completion files (`completions/whisperpaw.{bash,zsh,
+fish,nu}`) so `--transcript` shows up in Tab completion
+for every shell. The byte-identity test in
+`tests/test_completions.py` caught the drift and
+forced the regen, as it has for every prior tick.
+
+**Total: 781/781 green** (17 new + 764 existing).
+Pure stdlib, no new pip deps, no telemetry, no
+network. The new helpers live in
+`whisperpaw/watch.py` next to `_emit_line` so the
+"per-line dispatch" public surface stays co-located.
+
+**Next tick.** `paw-watch` now has full
+production-watch ergonomics: rate / volume / max-lines
+/ include-stderr / follow / dry-run / transcript.
+Natural follow-ups for `paw-watch`: a `--separator` to
+control what comes between concatenated lines from
+`--include-stderr` streams, a `--prefix` to tag every
+line with the watched-command name (so multiple
+concurrent paws can share a single transcript), or a
+companion `paw-watch --tee PATH` that mirrors
+*stdout* to a file (the stdin half of the conventional
+shell pipe). None of those is ready today; will pick
+based on what the user actually needs next. For other
+tools: still a fourth sound pack on standby (needs a
+user request) and the chained `--list-capture-info`
+introspection on `paw-zoom` (already mentioned last
+tick). 🐾

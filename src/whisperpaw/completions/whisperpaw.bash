@@ -40,13 +40,13 @@ _paw_complete_paw_sound() {
 complete -F _paw_complete_paw_sound paw-sound
 
 _paw_watch_flags() {
-  COMPREPLY=(--rate --volume --max-lines --include-stderr --quiet --follow --dry-run)
+  COMPREPLY=(--rate --volume --max-lines --include-stderr --quiet --follow --dry-run --transcript)
 }
 _paw_complete_paw_watch() {
   local cur prev
   cur="${COMP_WORDS[COMP_CWORD]}"
   if [[ "$cur" == --* ]]; then
-    COMPREPLY=($(compgen -W '--rate --volume --max-lines --include-stderr --quiet --follow --dry-run' -- "$cur"))
+    COMPREPLY=($(compgen -W '--rate --volume --max-lines --include-stderr --quiet --follow --dry-run --transcript' -- "$cur"))
     return 0
   fi
   # No subcommands; nothing else to complete.

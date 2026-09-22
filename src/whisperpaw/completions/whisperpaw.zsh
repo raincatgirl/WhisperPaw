@@ -50,7 +50,8 @@ _paw_watch() {
     '--include-stderr[Also speak lines that arrive on stderr (in addition to stdout).]' \
     '--quiet[Suppress the announcement line (still speaks).]' \
     '--follow[Stream the output instead of waiting for the command to finish: each new line i…]' \
-    '--dry-run[Print each line that *would* be spoken to stdout, one per line, instead of call…]'
+    '--dry-run[Print each line that *would* be spoken to stdout, one per line, instead of call…]' \
+    '--transcript[Also append every line that is spoken (or, with --dry-run, that would be spoken…]'
 }
 _paw_watch "$@"
 

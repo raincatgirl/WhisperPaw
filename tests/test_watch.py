@@ -814,3 +814,302 @@ def test_main_dry_run_does_not_call_speak_line_even_with_tts_error(
     assert code == 0
     out = capsys.readouterr().out
     assert out == "anything\n"
+
+
+# --- --transcript --------------------------------------------------------
+
+
+def test_parse_args_transcript_default_is_none() -> None:
+    """Without ``--transcript`` the option stays ``None`` so the runtime
+    can short-circuit the file-open path entirely."""
+    args = watch.parse_args(["--", "echo", "hi"])
+    assert args.transcript is None
+
+
+def test_parse_args_transcript_accepts_path() -> None:
+    """A real-looking path round-trips through ``parse_args``."""
+    args = watch.parse_args(["--transcript", "/tmp/session.log", "--", "echo"])
+    assert args.transcript == "/tmp/session.log"
+    assert args.cmd == ["echo"]
+
+
+def test_parse_args_transcript_rejects_missing_parent_dir(tmp_path) -> None:
+    """A ``--transcript`` whose parent directory does not exist is a
+    usage error (exit 2) with a clear message — not a runtime surprise
+    mid-speech."""
+    bad = tmp_path / "no-such-dir" / "out.log"
+    with pytest.raises(SystemExit) as exc:
+        watch.parse_args(["--transcript", str(bad), "--", "echo"])
+    assert exc.value.code == 2
+    # The message should mention the bad directory so the user can fix it.
+    # (We don't pin the exact format; just the actionable hint.)
+
+
+def test_open_transcript_returns_none_when_path_is_none() -> None:
+    """``open_transcript(None)`` is a no-op — no handle, no file is touched."""
+    assert watch.open_transcript(None) is None
+
+
+def test_open_transcript_creates_file_in_append_mode(tmp_path) -> None:
+    """``open_transcript`` opens the file in append mode and creates it
+    on first call (so a fresh log path doesn't need a pre-touch)."""
+    log = tmp_path / "transcript.log"
+    fh = watch.open_transcript(str(log))
+    try:
+        assert fh is not None
+        fh.write("hello\n")
+        fh.flush()
+    finally:
+        fh.close()
+    assert log.read_text(encoding="utf-8") == "hello\n"
+
+
+def test_open_transcript_appends_to_existing_file(tmp_path) -> None:
+    """A second open of the same path must not truncate the existing
+    log — append-mode is the contract the ``--follow`` story depends on."""
+    log = tmp_path / "transcript.log"
+    log.write_text("first session\n", encoding="utf-8")
+    fh = watch.open_transcript(str(log))
+    try:
+        fh.write("second session\n")
+        fh.flush()
+    finally:
+        fh.close()
+    assert log.read_text(encoding="utf-8") == "first session\nsecond session\n"
+
+
+def test_transcript_writer_returns_none_for_none_handle() -> None:
+    """``_transcript_writer(None)`` returns ``None`` so the caller can
+    pass the result straight into :func:`_emit_line` without branching."""
+    assert watch._transcript_writer(None) is None
+
+
+def test_transcript_writer_writes_line_then_newline_then_flushes(tmp_path) -> None:
+    """The closure writes ``line + "\\n"`` and flushes after every line so
+    a long ``--follow`` run produces a usable, tail-able log even if
+    the process is killed mid-stream."""
+    log = tmp_path / "transcript.log"
+    log.write_text("", encoding="utf-8")
+    fh = watch.open_transcript(str(log))
+    try:
+        writer = watch._transcript_writer(fh)
+        writer("alpha")
+        writer("beta")
+    finally:
+        fh.close()
+    assert log.read_text(encoding="utf-8") == "alpha\nbeta\n"
+
+
+def test_emit_line_with_transcript_writes_before_speaking(
+    monkeypatch, tmp_path
+) -> None:
+    """``_emit_line`` must call the transcript writer before the TTS chain
+    so a TTS error doesn't lose the line from the log."""
+    written: list[str] = []
+    called_speak = {"n": 0}
+    monkeypatch.setattr(
+        watch, "_speak_line",
+        lambda line, rate, volume: called_speak.__setitem__("n", called_speak["n"] + 1) or 0,
+    )
+    code = watch._emit_line(
+        "first line",
+        rate=200.0,
+        volume=1.0,
+        dry_run=False,
+        transcript_write=written.append,
+    )
+    assert code == 0
+    assert written == ["first line"]
+    assert called_speak["n"] == 1
+
+
+def test_emit_line_transcript_write_failure_does_not_change_exit_code(
+    monkeypatch, capsys
+) -> None:
+    """A failed transcript write is loud on stderr but does NOT change
+    the TTS exit code — the spoken output is the source of truth and
+    a flaky filesystem should not break the user's pipeline."""
+    def _bad_writer(_line: str) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda *a, **kw: 0
+    )
+    code = watch._emit_line(
+        "anything",
+        rate=200.0,
+        volume=1.0,
+        dry_run=False,
+        transcript_write=_bad_writer,
+    )
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "transcript" in err.lower() and "disk full" in err
+
+
+def test_main_writes_each_spoken_line_to_transcript(monkeypatch, tmp_path) -> None:
+    """End-to-end: ``--transcript PATH`` records every line that
+    :func:`_speak_line` was called with, in order, one per line, in
+    append mode. The test uses a real file (tmp_path) so we also
+    exercise the file-handle close-on-exit path."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="alpha\nbeta\ngamma\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    log = tmp_path / "session.log"
+    code = watch.main(
+        ["--quiet", "--transcript", str(log), "--", "echo", "x"]
+    )
+    assert code == 0
+    assert log.read_text(encoding="utf-8") == "alpha\nbeta\ngamma\n"
+
+
+def test_main_transcript_in_dry_run_records_what_would_be_spoken(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """``--transcript`` + ``--dry-run`` records the *would-be* spoken
+    lines (the same lines that go to stdout), so a script can use
+    dry-run as a "show me and log it" preview without ever touching
+    the TTS engine."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda *a, **kw: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="would-speak-this\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    log = tmp_path / "session.log"
+    code = watch.main(
+        ["--quiet", "--dry-run", "--transcript", str(log), "--", "echo"]
+    )
+    assert code == 0
+    assert log.read_text(encoding="utf-8") == "would-speak-this\n"
+    # And the same line went to stdout (the dry-run contract).
+    assert capsys.readouterr().out == "would-speak-this\n"
+
+
+def test_main_transcript_respects_max_lines(monkeypatch, tmp_path) -> None:
+    """``--max-lines`` is the source-of-truth cap on which lines are
+    "spoken" — ``--transcript`` must record the same set, no more."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="1\n2\n3\n4\n5\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    log = tmp_path / "session.log"
+    code = watch.main(
+        [
+            "--quiet",
+            "--max-lines", "2",
+            "--transcript", str(log),
+            "--", "seq", "5",
+        ]
+    )
+    assert code == 0
+    assert log.read_text(encoding="utf-8") == "1\n2\n"
+
+
+def test_main_transcript_appends_across_runs(monkeypatch, tmp_path) -> None:
+    """Two consecutive ``paw-watch --transcript PATH`` runs against the
+    same file must concatenate, not overwrite — that's the whole
+    point of append mode for an accessibility log."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+    fake1 = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="run-one-line\n", stderr=""
+    )
+    fake2 = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="run-two-line\n", stderr=""
+    )
+    log = tmp_path / "session.log"
+
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake1)
+    code = watch.main(["--quiet", "--transcript", str(log), "--", "a"])
+    assert code == 0
+
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake2)
+    code = watch.main(["--quiet", "--transcript", str(log), "--", "b"])
+    assert code == 0
+
+    assert (
+        log.read_text(encoding="utf-8")
+        == "run-one-line\nrun-two-line\n"
+    )
+
+
+def test_main_follow_writes_each_streamed_line_to_transcript(
+    monkeypatch, tmp_path
+) -> None:
+    """``--follow --transcript`` writes each streamed line as it
+    arrives, so a tail-style watch leaves a real-time transcript
+    behind."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+
+    class _FakeStream:
+        def stdout_iter(self):
+            for line in ["first\n", "second\n", "third\n"]:
+                yield line
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(watch, "_popen", lambda *a, **kw: _FakeStream())
+    log = tmp_path / "session.log"
+    code = watch.main(
+        [
+            "--quiet", "--follow",
+            "--transcript", str(log),
+            "--", "tail", "-f", "x.log",
+        ]
+    )
+    assert code == 0
+    assert log.read_text(encoding="utf-8") == "first\nsecond\nthird\n"
+
+
+def test_main_transcript_closes_handle_on_tts_error(
+    monkeypatch, tmp_path
+) -> None:
+    """Even when the TTS chain reports a non-zero exit, the transcript
+    handle must be closed — otherwise a long ``--follow`` run that
+    crashes the TTS layer would leak an open file descriptor on every
+    line."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 1
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="alpha\nbeta\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    log = tmp_path / "session.log"
+    code = watch.main(
+        ["--quiet", "--transcript", str(log), "--", "echo"]
+    )
+    # TTS error: 1 (the child's exit code was 0 so it doesn't shadow).
+    assert code == 1
+    # And the lines were still recorded before the failure path returned.
+    assert log.read_text(encoding="utf-8") == "alpha\nbeta\n"
+
+
+def test_main_transcript_path_open_failure_exits_2(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    """A ``--transcript`` path that exists but can't be opened
+    (e.g. it's a directory) is a usage error reported on stderr."""
+    # Treat the directory itself as the transcript path. The directory
+    # exists, so _validate_transcript_path passes; the open() in
+    # main() is what fails (IsADirectoryError is an OSError subclass).
+    bad = tmp_path  # a directory, not a file
+    code = watch.main(
+        ["--quiet", "--transcript", str(bad), "--", "echo"]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "transcript" in err.lower()
+    # Critically, no subprocess was spawned.

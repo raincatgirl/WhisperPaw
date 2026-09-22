@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from pathlib import Path
 from typing import Iterator
 
 # Reuse the TTS chain from paw-read. Importing it here (rather than
@@ -129,6 +130,23 @@ def build_parser() -> argparse.ArgumentParser:
             "(never a TTS error) so it composes with `set -e` scripts."
         ),
     )
+    parser.add_argument(
+        "--transcript",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Also append every line that is spoken (or, with --dry-run, "
+            "that would be spoken) to PATH, one line per row, UTF-8, "
+            "opened in append mode. Useful for an accessibility log of "
+            "what was announced: ``paw-watch --transcript ~/.local/"
+            "share/whisperpaw/session.log -- make`` keeps a record of "
+            "every line the screen reader heard. The file is created "
+            "if missing; its parent directory must already exist. "
+            "A failed write is reported on stderr but does not change "
+            "the exit code (the spoken/printed output is the source "
+            "of truth)."
+        ),
+    )
     return parser
 
 
@@ -159,6 +177,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.max_lines < 0:
         print("paw-watch: --max-lines must be >= 0", file=sys.stderr)
         raise SystemExit(2)
+    if args.transcript is not None:
+        _validate_transcript_path(args.transcript)
     return args
 
 
@@ -316,22 +336,102 @@ def _emit_line(
     rate: float,
     volume: float,
     dry_run: bool,
+    transcript_write=None,
 ) -> int:
     """Speak ``line`` (or print it in dry-run mode) and return the TTS code.
 
     Centralises the "speak vs. print" branch so the batch and streaming
     paths stay symmetric. In dry-run mode the line goes to stdout and we
     return 0 — the dry-run path never reports a TTS error.
+
+    If ``transcript_write`` is supplied (a ``callable[[str], None]``),
+    the line is also forwarded to it before we speak/print. The same
+    line is written in speak mode and in dry-run mode, because the
+    transcript is the record of "what the user heard" — and in
+    dry-run mode the line *is* the announcement.
     """
+    if transcript_write is not None:
+        try:
+            transcript_write(line)
+        except OSError as exc:
+            # A failed write is loud on stderr but not fatal — the
+            # spoken/printed output is still the source of truth.
+            print(
+                f"paw-watch: --transcript write failed: {exc}",
+                file=sys.stderr,
+            )
     if dry_run:
         print(line)
         return 0
     return _speak_line(line, rate, volume)
 
 
+def _validate_transcript_path(path: str) -> None:
+    """Validate the ``--transcript`` target at parse time.
+
+    We accept the path if the parent directory exists (or is ``""`` /
+    ``"."`` — i.e. the current working directory) and is a directory.
+    The transcript file itself is created on first write, so it does
+    not need to exist yet. A bad path is reported on stderr and exits
+    2, matching the other ``--foo must be …`` validations in
+    :func:`parse_args`.
+    """
+    p = Path(path)
+    parent = p.parent if str(p.parent) else Path(".")
+    if not parent.is_dir():
+        print(
+            f"paw-watch: --transcript parent directory does not exist: "
+            f"{parent}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+
+def open_transcript(path: str | None):
+    """Open the transcript file in append mode, or return ``None``.
+
+    Returns a text-mode file handle opened with ``encoding="utf-8"``,
+    ``newline=""`` (so the Python runtime doesn't translate ``\n`` to
+    the platform default) and a leading BOM-less write. ``None`` is
+    returned when no ``--transcript`` was requested so the caller can
+    treat the handle uniformly.
+
+    The handle is the caller's to close — :func:`main` wraps the
+    speech loop in a ``try/finally`` that always closes it, so a
+    failing TTS chain or a KeyboardInterrupt cannot leak an
+    unflushed handle on long-running ``--follow`` runs.
+    """
+    if path is None:
+        return None
+    # ``newline=""`` lets us write ``\\n`` and get ``\\n`` back on every
+    # platform, which keeps the transcript grep-friendly across OSes.
+    return open(path, "a", encoding="utf-8", newline="")
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+
+def _transcript_writer(fh):
+    """Return a ``(line) -> None`` closure over an open transcript handle.
+
+    Centralises the per-line write + flush so :func:`_emit_line` doesn't
+    have to care about file handles. ``None`` is returned when no
+    transcript was requested, so the caller can pass it through
+    without an extra branch. The closure swallows the ``OSError`` via
+    :func:`_emit_line` (it is reported on stderr but never fatal) and
+    the caller still owns ``fh`` for closing.
+    """
+    if fh is None:
+        return None
+
+    def _write(line: str) -> None:
+        fh.write(line)
+        fh.write("\n")
+        fh.flush()
+
+    return _write
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -340,6 +440,37 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         return int(exc.code) if isinstance(exc.code, int) else 2
 
+    # Open the transcript once for the whole run so a long ``--follow``
+    # stream appends in real time and so we always close it cleanly,
+    # even on a TTS error or a KeyboardInterrupt mid-loop. We open
+    # AFTER parse_args so a bad --transcript path is a clean exit-2
+    # before we touch any process.
+    try:
+        transcript_fh = open_transcript(args.transcript)
+    except OSError as exc:
+        print(
+            f"paw-watch: could not open --transcript {args.transcript!r}: "
+            f"{exc}",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        return _run(args, transcript_fh)
+    finally:
+        if transcript_fh is not None:
+            transcript_fh.close()
+
+
+def _run(args: argparse.Namespace, transcript_fh) -> int:
+    """Dispatch batch vs. ``--follow`` and own the announcement banner.
+
+    Splits the entry point so the transcript handle is opened /
+    closed by :func:`main` (with a single ``try/finally``) while the
+    per-mode loops stay in :func:`_run_batch` and
+    :func:`_run_streaming`. The ``transcript_write`` closure is
+    built here so both modes see the same "what to do with each
+    line" contract.
+    """
     if not args.quiet:
         mode = "follow" if args.follow else "tail"
         preview = " ".join(args.cmd)
@@ -348,11 +479,14 @@ def main(argv: list[str] | None = None) -> int:
         action = "previewing" if args.dry_run else f"{mode}ing"
         print(f"🐾 paw-watch: {action} `{preview}`")
 
+    writer = _transcript_writer(transcript_fh)
     if args.follow:
-        return _run_streaming(args)
+        return _run_streaming(args, writer)
+    return _run_batch(args, writer)
 
-    # Spawn the watched process. FileNotFoundError (binary missing) is
-    # mapped to exit 2 — this is a usage error from the user's side.
+
+def _run_batch(args: argparse.Namespace, writer) -> int:
+    """Batch path: spawn, collect stdout, speak each line in order."""
     try:
         completed = _spawn(args.cmd, include_stderr=args.include_stderr)
     except FileNotFoundError as exc:
@@ -377,6 +511,7 @@ def main(argv: list[str] | None = None) -> int:
             rate=args.rate,
             volume=args.volume,
             dry_run=args.dry_run,
+            transcript_write=writer,
         )
         spoken += 1
         if code != 0:
@@ -390,6 +525,7 @@ def main(argv: list[str] | None = None) -> int:
             rate=args.rate,
             volume=args.volume,
             dry_run=args.dry_run,
+            transcript_write=writer,
         )
         spoken += 1
         if code != 0:
@@ -406,7 +542,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _run_streaming(args: argparse.Namespace) -> int:
+def _run_streaming(args: argparse.Namespace, writer) -> int:
     """``--follow`` mode: speak each new stdout line as the child produces it.
 
     We open the child with :func:`_popen` and iterate ``stdout_iter()``
@@ -445,6 +581,7 @@ def _run_streaming(args: argparse.Namespace) -> int:
                     rate=args.rate,
                     volume=args.volume,
                     dry_run=args.dry_run,
+                    transcript_write=writer,
                 )
                 spoken += 1
                 if code != 0:
@@ -463,6 +600,7 @@ def _run_streaming(args: argparse.Namespace) -> int:
                 rate=args.rate,
                 volume=args.volume,
                 dry_run=args.dry_run,
+                transcript_write=writer,
             )
             spoken += 1
             if code != 0:

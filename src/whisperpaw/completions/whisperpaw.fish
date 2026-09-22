@@ -38,6 +38,7 @@ complete -c paw-watch -l include-stderr -d 'Also speak lines that arrive on stde
 complete -c paw-watch -l quiet -d 'Suppress the announcement line (still speaks).'
 complete -c paw-watch -l follow -d 'Stream the output instead of waiting for the command to finish: each new line i…'
 complete -c paw-watch -l dry-run -d 'Print each line that *would* be spoken to stdout, one per line, instead of call…'
+complete -c paw-watch -l transcript -d 'Also append every line that is spoken (or, with --dry-run, that would be spoken…'
 
 # Auto-generated completions for paw-zoom.
 complete -c paw-zoom -l file -d 'Read text from this UTF-8 file instead of positional args.'
