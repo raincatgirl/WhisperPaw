@@ -1113,3 +1113,314 @@ def test_main_transcript_path_open_failure_exits_2(
     err = capsys.readouterr().err
     assert "transcript" in err.lower()
     # Critically, no subprocess was spawned.
+
+
+# --- --prefix -------------------------------------------------------------
+
+
+def test_parse_args_prefix_default_is_empty_string() -> None:
+    """Without ``--prefix`` the option stays the empty string, so the
+    no-flag behaviour is bit-identical to the pre-``--prefix`` code
+    (no leading ``[] `` for an empty label)."""
+    args = watch.parse_args(["--", "echo"])
+    assert args.prefix == ""
+
+
+def test_parse_args_prefix_accepts_label() -> None:
+    """``--prefix TEXT`` is exposed on the namespace as ``args.prefix``."""
+    args = watch.parse_args(["--prefix", "build", "--", "npm", "run", "build"])
+    assert args.prefix == "build"
+    assert args.cmd == ["npm", "run", "build"]
+
+
+def test_parse_args_prefix_combines_with_transcript() -> None:
+    """``--prefix`` and ``--transcript`` are independent flags — the
+    transcript path is still validated at parse time and the prefix
+    is still attached to the namespace."""
+    args = watch.parse_args(
+        [
+            "--prefix", "test",
+            "--transcript", "/tmp/x.log",
+            "--", "pytest",
+        ]
+    )
+    assert args.prefix == "test"
+    assert args.transcript == "/tmp/x.log"
+
+
+def test_apply_prefix_empty_prefix_is_noop() -> None:
+    """``_apply_prefix`` with an empty ``prefix`` returns the line
+    verbatim — the no-flag code path is bit-identical to the
+    pre-``--prefix`` behaviour."""
+    assert watch._apply_prefix("hello", "") == "hello"
+    assert watch._apply_prefix("", "") == ""
+
+
+def test_apply_prefix_wraps_in_brackets_with_space() -> None:
+    """``_apply_prefix`` returns ``f"[{prefix}] {line}"`` — the
+    conventional tagging shape (square brackets + single space
+    separator) used by the announcement banner and every other
+    ``whisperpaw`` log line."""
+    assert watch._apply_prefix("hello", "build") == "[build] hello"
+    assert watch._apply_prefix("a", "x") == "[x] a"
+
+
+def test_apply_prefix_preserves_unicode_in_line() -> None:
+    """A non-ASCII line passes through unchanged; the bracket-and-space
+    ASCII wrapper is still applied around it."""
+    assert watch._apply_prefix("编译中…", "build") == "[build] 编译中…"
+
+
+def test_emit_line_prefix_in_speak_mode(monkeypatch) -> None:
+    """In speak mode the prefix is prepended to the line that reaches
+    the TTS chain (not just the dry-run printer)."""
+    seen: list[str] = []
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: (seen.append(line) or 0)
+    )
+    code = watch._emit_line(
+        "compiling", rate=200.0, volume=1.0, dry_run=False, prefix="build"
+    )
+    assert code == 0
+    assert seen == ["[build] compiling"]
+
+
+def test_emit_line_prefix_in_dry_run(capsys, monkeypatch) -> None:
+    """In dry-run mode the prefix is prepended to the line that goes
+    to stdout, so the printed record is consistent with what would
+    have been spoken."""
+    spoke = {"called": False}
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda *a, **kw: (spoke.__setitem__("called", True) or 0)
+    )
+    code = watch._emit_line(
+        "running suite", rate=200.0, volume=1.0, dry_run=True, prefix="test"
+    )
+    assert code == 0
+    assert not spoke["called"]
+    assert capsys.readouterr().out == "[test] running suite\n"
+
+
+def test_emit_line_empty_prefix_is_bit_identical_to_no_flag(monkeypatch) -> None:
+    """``_emit_line`` with the default ``prefix=""`` produces the same
+    line as the pre-``--prefix`` code — no spurious ``[] `` wrapper."""
+    seen: list[str] = []
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: (seen.append(line) or 0)
+    )
+    code = watch._emit_line("hello", rate=200.0, volume=1.0, dry_run=False)
+    assert code == 0
+    assert seen == ["hello"]
+
+
+def test_emit_line_prefix_applied_before_transcript_write(monkeypatch) -> None:
+    """When both ``prefix`` and ``transcript_write`` are set, the
+    tagged line is what hits the transcript — so the on-disk record
+    carries the tag too."""
+    written: list[str] = []
+    seen: list[str] = []
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: (seen.append(line) or 0)
+    )
+    code = watch._emit_line(
+        "alpha",
+        rate=200.0,
+        volume=1.0,
+        dry_run=False,
+        prefix="build",
+        transcript_write=written.append,
+    )
+    assert code == 0
+    assert written == ["[build] alpha"]
+    assert seen == ["[build] alpha"]
+
+
+def test_main_prefix_tags_every_spoken_line(monkeypatch) -> None:
+    """End-to-end: a batch run with ``--prefix build`` forwards
+    ``[build] LINE`` to ``_speak_line`` for every output line."""
+    seen: list[str] = []
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: (seen.append(line) or 0)
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="first\nsecond\nthird\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    code = watch.main(["--quiet", "--prefix", "build", "--", "echo"])
+    assert code == 0
+    assert seen == ["[build] first", "[build] second", "[build] third"]
+
+
+def test_main_prefix_empty_by_default(monkeypatch) -> None:
+    """Without ``--prefix`` the spoken lines are byte-identical to the
+    pre-``--prefix`` code — no spurious ``[] `` wrapper."""
+    seen: list[str] = []
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: (seen.append(line) or 0)
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="a\nb\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    code = watch.main(["--quiet", "--", "echo"])
+    assert code == 0
+    assert seen == ["a", "b"]
+
+
+def test_main_prefix_in_dry_run_prints_tagged_lines(
+    monkeypatch, capsys
+) -> None:
+    """``--prefix`` + ``--dry-run`` prints ``[TEXT] LINE`` to stdout —
+    the same tagged shape the speak / transcript sinks would have
+    produced, so a preview matches the eventual record."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda *a, **kw: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="alpha\nbeta\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    code = watch.main(
+        ["--quiet", "--dry-run", "--prefix", "test", "--", "echo"]
+    )
+    assert code == 0
+    assert capsys.readouterr().out == "[test] alpha\n[test] beta\n"
+
+
+def test_main_prefix_writes_tagged_lines_to_transcript(
+    monkeypatch, tmp_path
+) -> None:
+    """``--prefix`` + ``--transcript`` writes ``[TEXT] LINE`` to the
+    log file — the primary use case (tagging concurrent sessions
+    sharing a single log)."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="compiling\nlinking\ndone\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    log = tmp_path / "session.log"
+    code = watch.main(
+        [
+            "--quiet",
+            "--prefix", "build",
+            "--transcript", str(log),
+            "--", "make",
+        ]
+    )
+    assert code == 0
+    assert (
+        log.read_text(encoding="utf-8")
+        == "[build] compiling\n[build] linking\n[build] done\n"
+    )
+
+
+def test_main_two_concurrent_paw_watches_share_one_transcript(
+    monkeypatch, tmp_path
+) -> None:
+    """The headline use case: two ``paw-watch`` invocations with
+    different ``--prefix`` values write distinguishable tagged lines
+    to a *shared* ``--transcript`` file, so a downstream reader can
+    tell the two streams apart at a glance."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+
+    fake1 = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="compiling\n", stderr=""
+    )
+    fake2 = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="running suite\n", stderr=""
+    )
+    log = tmp_path / "shared.log"
+
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake1)
+    code = watch.main(
+        [
+            "--quiet",
+            "--prefix", "build",
+            "--transcript", str(log),
+            "--", "make",
+        ]
+    )
+    assert code == 0
+
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake2)
+    code = watch.main(
+        [
+            "--quiet",
+            "--prefix", "test",
+            "--transcript", str(log),
+            "--", "pytest",
+        ]
+    )
+    assert code == 0
+
+    assert (
+        log.read_text(encoding="utf-8")
+        == "[build] compiling\n[test] running suite\n"
+    )
+
+
+def test_main_follow_prefix_tags_streamed_lines(monkeypatch) -> None:
+    """``--follow --prefix`` tags every streamed line, so a live
+    tail-style session leaves a tagged real-time record."""
+    seen: list[str] = []
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: (seen.append(line) or 0)
+    )
+
+    class _FakeStream:
+        def stdout_iter(self):
+            for line in ["event-a\n", "event-b\n"]:
+                yield line
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(watch, "_popen", lambda *a, **kw: _FakeStream())
+    code = watch.main(
+        ["--quiet", "--follow", "--prefix", "svc", "--", "tail", "-f", "x.log"]
+    )
+    assert code == 0
+    assert seen == ["[svc] event-a", "[svc] event-b"]
+
+
+def test_main_prefix_respects_max_lines(monkeypatch) -> None:
+    """``--prefix`` does not change the cap: ``--max-lines N`` still
+    stops at the Nth *original* line, and every emitted line is
+    tagged."""
+    seen: list[str] = []
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: (seen.append(line) or 0)
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="1\n2\n3\n4\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    code = watch.main(
+        [
+            "--quiet",
+            "--max-lines", "2",
+            "--prefix", "n",
+            "--", "seq", "4",
+        ]
+    )
+    assert code == 0
+    assert seen == ["[n] 1", "[n] 2"]
+
+
+def test_main_prefix_propagates_tts_error(monkeypatch) -> None:
+    """A TTS error on a tagged line still surfaces as exit 1 — the
+    prefix is purely cosmetic from the error-code perspective."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 1
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="boom\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    code = watch.main(
+        ["--quiet", "--prefix", "x", "--", "echo"]
+    )
+    assert code == 1

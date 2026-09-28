@@ -147,6 +147,26 @@ def build_parser() -> argparse.ArgumentParser:
             "of truth)."
         ),
     )
+    parser.add_argument(
+        "--prefix",
+        default="",
+        metavar="TEXT",
+        help=(
+            "Prepend ``[TEXT] `` to every line that is spoken, "
+            "dry-run-printed, and/or appended to ``--transcript``. "
+            "Useful for tagging a watch session so multiple concurrent "
+            "paw-watch invocations sharing a single ``--transcript`` "
+            "file can be told apart at a glance: ``paw-watch --prefix "
+            "build --transcript shared.log -- npm run build`` writes "
+            "``[build] compiling...`` to the log; a sibling "
+            "``paw-watch --prefix test --transcript shared.log -- npm "
+            "test`` writes ``[test] running suite...`` to the same "
+            "log. Empty string (the default) adds no prefix. The same "
+            "prefix is applied in speak and dry-run mode, and to the "
+            "transcript, so the on-screen / on-disk record stays "
+            "consistent across all three sinks."
+        ),
+    )
     return parser
 
 
@@ -330,6 +350,23 @@ def _speak_line(line: str, rate: float, volume: float) -> int:
     return last
 
 
+def _apply_prefix(line: str, prefix: str) -> str:
+    """Return ``line`` with ``[prefix] `` prepended, or ``line`` unchanged.
+
+    Centralises the prefix format so :func:`_emit_line` doesn't have to
+    care about edge cases. An empty ``prefix`` (the default) is a
+    no-op — the line passes through verbatim, keeping the no-flag
+    behaviour bit-identical to the pre-``--prefix`` code. A
+    non-empty ``prefix`` is wrapped in square brackets and joined to
+    the line with a single space, the conventional tagging shape
+    used by ``paw-watch``'s announcement banner and by every other
+    ``whisperpaw`` log line.
+    """
+    if not prefix:
+        return line
+    return f"[{prefix}] {line}"
+
+
 def _emit_line(
     line: str,
     *,
@@ -337,6 +374,7 @@ def _emit_line(
     volume: float,
     dry_run: bool,
     transcript_write=None,
+    prefix: str = "",
 ) -> int:
     """Speak ``line`` (or print it in dry-run mode) and return the TTS code.
 
@@ -349,7 +387,15 @@ def _emit_line(
     line is written in speak mode and in dry-run mode, because the
     transcript is the record of "what the user heard" — and in
     dry-run mode the line *is* the announcement.
+
+    If ``prefix`` is non-empty, it is prepended (``[TEXT] ``) to the
+    line before it is forwarded to either sink, so the spoken /
+    dry-run / transcript outputs are tagged consistently. The
+    transformation happens once, here, so the three sinks cannot
+    drift.
     """
+    if prefix:
+        line = _apply_prefix(line, prefix)
     if transcript_write is not None:
         try:
             transcript_write(line)
@@ -512,6 +558,7 @@ def _run_batch(args: argparse.Namespace, writer) -> int:
             volume=args.volume,
             dry_run=args.dry_run,
             transcript_write=writer,
+            prefix=args.prefix,
         )
         spoken += 1
         if code != 0:
@@ -526,6 +573,7 @@ def _run_batch(args: argparse.Namespace, writer) -> int:
             volume=args.volume,
             dry_run=args.dry_run,
             transcript_write=writer,
+            prefix=args.prefix,
         )
         spoken += 1
         if code != 0:
@@ -582,6 +630,7 @@ def _run_streaming(args: argparse.Namespace, writer) -> int:
                     volume=args.volume,
                     dry_run=args.dry_run,
                     transcript_write=writer,
+                    prefix=args.prefix,
                 )
                 spoken += 1
                 if code != 0:
@@ -601,6 +650,7 @@ def _run_streaming(args: argparse.Namespace, writer) -> int:
                 volume=args.volume,
                 dry_run=args.dry_run,
                 transcript_write=writer,
+                prefix=args.prefix,
             )
             spoken += 1
             if code != 0:

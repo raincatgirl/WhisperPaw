@@ -51,7 +51,8 @@ _paw_watch() {
     '--quiet[Suppress the announcement line (still speaks).]' \
     '--follow[Stream the output instead of waiting for the command to finish: each new line i…]' \
     '--dry-run[Print each line that *would* be spoken to stdout, one per line, instead of call…]' \
-    '--transcript[Also append every line that is spoken (or, with --dry-run, that would be spoken…]'
+    '--transcript[Also append every line that is spoken (or, with --dry-run, that would be spoken…]' \
+    '--prefix[Prepend ``[TEXT] `` to every line that is spoken, dry-run-printed, and/or appen…]'
 }
 _paw_watch "$@"
 

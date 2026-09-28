@@ -2798,3 +2798,106 @@ tools: still a fourth sound pack on standby (needs a
 user request) and the chained `--list-capture-info`
 introspection on `paw-zoom` (already mentioned last
 tick). 🐾
+
+---
+
+## 2026-09-28 — paw-watch: `--prefix TEXT` (line tag for shared logs)
+
+**What.** New `--prefix TEXT` flag on `paw-watch`. For every line that
+is spoken, dry-run-printed, or appended to `--transcript`, the line is
+prepended with ``[TEXT] ``. Empty string (the default) is a no-op, so
+the no-flag code path is bit-identical to the pre-`--prefix` behaviour.
+
+**Why.** The headline use case is **tagging concurrent sessions that
+share a single `--transcript` log file**. Today, two `paw-watch`
+invocations writing to the same log leave an indistinguishable stream
+of lines — a downstream reader cannot tell `make`'s output from
+`pytest`'s. With `--prefix` they get distinct, greppable tags:
+
+```
+paw-watch --prefix build --transcript shared.log -- npm run build
+paw-watch --prefix test  --transcript shared.log -- npm test
+```
+
+…leave `[build] compiling…` and `[test] running suite…` in the
+same file, easy to slice with `grep '^\[build\]'` /
+`grep '^\[test\]'`. The flag also helps a single-user run
+("which pane is this announcement from?") and an
+`--include-stderr` log ("is this stdout or stderr?") — the
+prefix is *the* way to disambiguate a multi-source stream.
+
+**How.** Three small additions, all confined to
+`whisperpaw/watch.py`:
+
+- `_apply_prefix(line, prefix)` — pure helper. Empty `prefix`
+  short-circuits to a no-op (the no-flag code path is
+  bit-identical); non-empty `prefix` returns
+  `f"[{prefix}] {line}"` — the conventional tagging shape
+  used by `paw-watch`'s announcement banner and every other
+  `whisperpaw` log line.
+- `_emit_line(line, *, rate, volume, dry_run,
+  transcript_write=None, prefix="")` — gained a new
+  `prefix` keyword. The transformation is applied **once** in
+  `_emit_line`, before the line is forwarded to the
+  `transcript_write` closure *or* the TTS chain *or* the
+  dry-run printer, so the three sinks cannot drift.
+- `_run_batch` and `_run_streaming` — pass
+  `prefix=args.prefix` through to every `_emit_line` call.
+  The argparse parser adds the new `--prefix TEXT` flag with
+  a verbose `--help` text spelling out the shared-log use case
+  with a concrete example.
+
+The transformation is centralised so `paw-watch` keeps the
+contract that **all three output sinks (speak / dry-run / transcript)
+see the same tagged line**. A TTS error on a tagged line still
+surfaces as exit 1; a transcript write failure is still loud on
+stderr but not fatal; `--max-lines` still caps on the Nth
+*original* line (every emitted line is tagged, not "the Nth
+tagged line"). All of these are covered by the new test suite.
+
+**Tests.** 18 new tests in `tests/test_watch.py`:
+
+- 3 `parse_args` tests: default empty string / accepts a
+  label / composes with `--transcript`.
+- 3 `_apply_prefix` low-level tests: empty no-op / bracket +
+  space format / non-ASCII line passes through.
+- 4 `_emit_line` tests: tags in speak mode / tags in dry-run
+  mode / empty prefix is bit-identical / prefix applied
+  before the transcript write (so the file sees the tag too).
+- 8 `main()` end-to-end tests: tags every spoken line / empty
+  by default / dry-run prints tagged lines / transcript
+  writes tagged lines / **the headline use case — two
+  concurrent `paw-watch` invocations with different `--prefix`
+  values sharing one `--transcript`** / `--follow` tags
+  streamed lines / `--max-lines` cap still fires on the Nth
+  *original* line / TTS error still propagates as exit 1.
+
+The 70 pre-existing watch tests are still green (the empty
+prefix is a verified no-op, not just a "looks the same"
+hope), and the new tests cover the four composition axes
+(speak / dry-run / transcript / follow).
+
+**Bookkeeping.** Regenerated all four static shell-completion
+files (`completions/whisperpaw.{bash,zsh,fish,nu}`) so
+`--prefix` shows up in Tab completion for every shell. The
+byte-identity test in `tests/test_completions.py` caught the
+drift and forced the regen, as it has for every prior tick.
+
+**Total: 799/799 green** (18 new + 781 existing). Pure stdlib,
+no new pip deps, no telemetry, no network. The new helper
+lives next to `_transcript_writer` in `whisperpaw/watch.py`
+so the "per-line dispatch" public surface stays co-located.
+
+**Next tick.** `paw-watch` is now session-friendly: rate /
+volume / max-lines / include-stderr / follow / dry-run /
+transcript / prefix. Natural follow-ups for `paw-watch`: a
+`--separator` to control what comes between concatenated
+lines from `--include-stderr` streams (today it's the same
+`[prefix] ` shape for both), or a `--meta` flag that writes
+*one* per-session header line to the transcript at open
+("session started at T, command=X, prefix=Y") so a log is
+self-describing after the fact. For other tools: still a
+fourth sound pack on standby (needs a user request) and the
+chained `--list-capture-info` introspection on `paw-zoom`
+(already mentioned last tick). None of those is ready today;
+will pick based on what the user actually needs next. 🐾
