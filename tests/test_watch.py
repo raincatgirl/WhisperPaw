@@ -1424,3 +1424,349 @@ def test_main_prefix_propagates_tts_error(monkeypatch) -> None:
         ["--quiet", "--prefix", "x", "--", "echo"]
     )
     assert code == 1
+
+
+# --- --meta ---------------------------------------------------------------
+
+
+def test_parse_args_meta_default_is_off() -> None:
+    """Without ``--meta`` the flag stays ``False`` so the no-flag
+    transcript behaviour is bit-identical to the pre-``--meta`` code
+    (no leading header line in the log)."""
+    args = watch.parse_args(["--", "echo"])
+    assert args.meta is False
+
+
+def test_parse_args_meta_flag_on() -> None:
+    """``--meta`` is exposed on the namespace as ``args.meta = True``."""
+    args = watch.parse_args(["--meta", "--", "echo"])
+    assert args.meta is True
+
+
+def test_format_meta_is_single_line_starting_with_hash() -> None:
+    """The header is a single line beginning with ``#`` so the transcript
+    stays grep-friendly (``grep -v '^#'`` strips every header) and any
+    downstream ``tail -f`` consumer can recognise and ignore it.
+    """
+    from argparse import Namespace
+
+    args = Namespace(
+        cmd=["echo", "hi"],
+        prefix="",
+        rate=200.0,
+        volume=1.0,
+        max_lines=0,
+        follow=False,
+        dry_run=False,
+    )
+    fixed_now = watch._datetime(2026, 9, 28, 14, 55, 0, tzinfo=watch.timezone.utc)
+    line = watch._format_meta(args, now=fixed_now)
+    assert "\n" not in line
+    assert line.startswith("# ")
+
+
+def test_format_meta_includes_timestamp_cmd_and_key_flags() -> None:
+    """The header names the session clock, the command, the prefix, and
+    the runtime flags a reader most needs to interpret a log line.
+    """
+    from argparse import Namespace
+
+    args = Namespace(
+        cmd=["make", "test"],
+        prefix="ci",
+        rate=220.0,
+        volume=0.5,
+        max_lines=10,
+        follow=True,
+        dry_run=True,
+    )
+    fixed_now = watch._datetime(2026, 9, 28, 14, 55, 0, tzinfo=watch.timezone.utc)
+    line = watch._format_meta(args, now=fixed_now)
+    # The clock is ISO-8601 with a Z (UTC) suffix.
+    assert "2026-09-28T14:55:00Z" in line
+    # The full command, including its args, is embedded via shlex.join
+    # so a downstream parser can re-split it. For two plain words with
+    # no metacharacters, shlex.join emits a single space-separated
+    # string (`make test`); for an arg containing whitespace it would
+    # emit quoted form. We assert on the ``cmd=`` prefix + the words
+    # being present, which is the contract the user can rely on.
+    assert "cmd=" in line
+    assert "make test" in line
+    # The key runtime flags are present with their actual values.
+    assert "prefix=ci" in line
+    assert "rate=220" in line
+    assert "volume=0.5" in line
+    assert "max_lines=10" in line
+    assert "follow=True" in line
+    assert "dry_run=True" in line
+
+
+def test_format_meta_quotes_args_with_whitespace() -> None:
+    """An argv word containing whitespace or shell metacharacters is
+    quoted by ``shlex.join`` so the line round-trips through a
+    downstream parser. Plain words are emitted unquoted.
+    """
+    from argparse import Namespace
+
+    args = Namespace(
+        cmd=["echo", "hello world"],
+        prefix="",
+        rate=200.0,
+        volume=1.0,
+        max_lines=0,
+        follow=False,
+        dry_run=False,
+    )
+    fixed_now = watch._datetime(2026, 9, 28, 0, 0, 0, tzinfo=watch.timezone.utc)
+    line = watch._format_meta(args, now=fixed_now)
+    # The whitespace-bearing arg is wrapped in single quotes (the
+    # default ``shlex.join`` quoting style). The important property
+    # is that the command is *some* quoted form so a downstream
+    # parser can re-split it without ambiguity.
+    assert "cmd=echo 'hello world'" in line
+
+
+def test_format_meta_empty_prefix_is_omitted() -> None:
+    """When the user did not pass ``--prefix`` we don't print
+    ``prefix=`` in the header — leaving it out keeps the no-prefix
+    line tight, and a downstream consumer can default to ''."""
+    from argparse import Namespace
+
+    args = Namespace(
+        cmd=["echo"],
+        prefix="",
+        rate=200.0,
+        volume=1.0,
+        max_lines=0,
+        follow=False,
+        dry_run=False,
+    )
+    fixed_now = watch._datetime(2026, 9, 28, 0, 0, 0, tzinfo=watch.timezone.utc)
+    line = watch._format_meta(args, now=fixed_now)
+    assert "prefix=" not in line
+
+
+def test_write_meta_is_noop_when_fh_is_none() -> None:
+    """``write_meta(None, …)`` is a no-op so the caller can pass a
+    possibly-``None`` transcript handle through unchanged."""
+    from argparse import Namespace
+
+    args = Namespace(
+        cmd=["echo"],
+        prefix="",
+        rate=200.0,
+        volume=1.0,
+        max_lines=0,
+        follow=False,
+        dry_run=False,
+    )
+    # Should not raise.
+    assert watch.write_meta(None, args) is None
+
+
+def test_write_meta_writes_header_then_newline_then_flushes(tmp_path) -> None:
+    """``write_meta`` writes ``# …\\n`` to the handle and flushes, the
+    same write contract :func:`_transcript_writer` uses, so a half-killed
+    session still leaves a parseable header behind."""
+    from argparse import Namespace
+
+    args = Namespace(
+        cmd=["echo"],
+        prefix="",
+        rate=200.0,
+        volume=1.0,
+        max_lines=0,
+        follow=False,
+        dry_run=False,
+    )
+    log = tmp_path / "session.log"
+    fh = watch.open_transcript(str(log))
+    try:
+        watch.write_meta(fh, args)
+    finally:
+        fh.close()
+    body = log.read_text(encoding="utf-8")
+    assert body.startswith("# ")
+    assert body.endswith("\n")
+    # Exactly one line (no double-newline).
+    assert body.count("\n") == 1
+
+
+def test_main_meta_off_does_not_write_header(monkeypatch, tmp_path) -> None:
+    """Without ``--meta`` the transcript is bit-identical to the
+    pre-``--meta`` code — no header line, only the spoken rows."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="alpha\nbeta\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    log = tmp_path / "session.log"
+    code = watch.main(
+        ["--quiet", "--transcript", str(log), "--", "echo"]
+    )
+    assert code == 0
+    assert log.read_text(encoding="utf-8") == "alpha\nbeta\n"
+
+
+def test_main_meta_on_writes_header_before_first_line(
+    monkeypatch, tmp_path
+) -> None:
+    """With ``--meta`` the header is the *first* line of the
+    transcript, every spoken row follows, and the file ends with a
+    trailing newline. A reader running ``grep -v '^#' session.log``
+    gets just the spoken rows back."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="alpha\nbeta\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    log = tmp_path / "session.log"
+    code = watch.main(
+        ["--quiet", "--meta", "--transcript", str(log), "--", "echo", "x"]
+    )
+    assert code == 0
+    body = log.read_text(encoding="utf-8")
+    lines = body.splitlines()
+    # Header + the two spoken rows.
+    assert len(lines) == 3
+    assert lines[0].startswith("# ")
+    # And the command is in the header, not the row.
+    assert "cmd=" in lines[0]
+    assert "echo x" in lines[0]
+    assert lines[1:] == ["alpha", "beta"]
+
+
+def test_main_meta_without_transcript_is_silent(monkeypatch, capsys) -> None:
+    """``--meta`` is silently ignored when there is no ``--transcript``
+    to write into — the user might still want the flag in shell
+    aliases, and the no-op matches every other discovery flag's
+    "do nothing if there's no place to write" rule."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="hi\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    code = watch.main(["--quiet", "--meta", "--", "echo"])
+    assert code == 0
+    # Nothing on stderr (a no-op, not a warning).
+    assert capsys.readouterr().err == ""
+
+
+def test_main_meta_follow_writes_header_in_streaming_mode(
+    monkeypatch, tmp_path
+) -> None:
+    """``--follow --meta`` writes the header at open (before the first
+    streamed line), so a long ``tail -f``-style session whose process
+    takes minutes to produce a row still has a parseable header at
+    the top of the transcript."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+
+    class _FakeStream:
+        def stdout_iter(self):
+            for line in ["late-row-1\n", "late-row-2\n"]:
+                yield line
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(watch, "_popen", lambda *a, **kw: _FakeStream())
+    log = tmp_path / "session.log"
+    code = watch.main(
+        [
+            "--quiet", "--follow", "--meta",
+            "--transcript", str(log),
+            "--", "tail", "-f", "x.log",
+        ]
+    )
+    assert code == 0
+    body = log.read_text(encoding="utf-8")
+    lines = body.splitlines()
+    assert lines[0].startswith("# ")
+    assert lines[1:] == ["late-row-1", "late-row-2"]
+
+
+def test_main_meta_write_failure_does_not_change_exit_code(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """A failed meta write is loud on stderr but does NOT change the
+    exit code — the spoken/printed output is still the source of
+    truth, and the file-system error should not block the session
+    from running. Same contract the per-line transcript write has."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="alpha\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+
+    def _bad_write(fh, args, *, now=None) -> None:
+        raise OSError("disk full")
+
+    log = tmp_path / "session.log"
+    monkeypatch.setattr(watch, "write_meta", _bad_write)
+    code = watch.main(
+        ["--quiet", "--meta", "--transcript", str(log), "--", "echo"]
+    )
+    assert code == 0
+    # The error message is on stderr.
+    err = capsys.readouterr().err
+    assert "meta" in err.lower() and "disk full" in err
+
+
+def test_main_meta_dry_run_still_writes_header(monkeypatch, tmp_path) -> None:
+    """``--meta --dry-run --transcript`` records the header in the
+    transcript just like the speak mode does — dry-run is a "show
+    me and log it" preview, so the log should be self-describing
+    too."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda *a, **kw: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="would-speak\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    log = tmp_path / "session.log"
+    code = watch.main(
+        [
+            "--quiet", "--meta", "--dry-run",
+            "--transcript", str(log),
+            "--", "echo",
+        ]
+    )
+    assert code == 0
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert lines[0].startswith("# ")
+    assert lines[1] == "would-speak"
+
+
+def test_main_meta_includes_prefix_in_header(monkeypatch, tmp_path) -> None:
+    """When ``--prefix TEXT`` and ``--meta`` are combined, the header
+    records the prefix so a multi-session log can be re-parsed by
+    session even after the fact."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="row\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    log = tmp_path / "session.log"
+    code = watch.main(
+        [
+            "--quiet", "--meta", "--prefix", "build",
+            "--transcript", str(log),
+            "--", "make",
+        ]
+    )
+    assert code == 0
+    body = log.read_text(encoding="utf-8")
+    lines = body.splitlines()
+    assert "prefix=build" in lines[0]

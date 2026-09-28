@@ -2901,3 +2901,104 @@ fourth sound pack on standby (needs a user request) and the
 chained `--list-capture-info` introspection on `paw-zoom`
 (already mentioned last tick). None of those is ready today;
 will pick based on what the user actually needs next. 🐾
+
+
+## 2026-10-04 — paw-watch `--meta` (per-session transcript header)
+
+**What changed.** New `--meta` flag on `paw-watch`. When combined
+with `--transcript PATH`, writes a single `# paw-watch session: …`
+header line at the top of the log, recording the session clock
+(UTC, ISO-8601 with `Z` suffix), the full command (via `shlex.join`
+so a whitespace-bearing argv round-trips), and the runtime flags
+(`rate` / `volume` / `max_lines` / `follow` / `dry_run`, with
+`prefix` appended only when non-empty). Off by default — without
+the flag the transcript is bit-identical to the pre-`--meta` code.
+
+**Why.** Last tick's `--prefix` let two `paw-watch` invocations
+share one `--transcript` log and tell their lines apart, but a
+reader running `tail -f` on a long `--follow` still couldn't tell
+*which session* a row belonged to without re-reading the original
+CLI. `--meta` makes the log self-describing from the first byte:
+`grep '^#' session.log` picks the session headers,
+`grep -v '^#' session.log` picks the spoken rows, and a long
+`--follow` whose child process takes minutes to produce its first
+row still has a parseable header at the top of the file. The
+header also embeds the runtime flags so a downstream consumer
+can re-build session state without re-running the command.
+
+**Design choices.**
+
+- **Header is the FIRST line of the log, not a sidecar.** A
+  sidecar (`.meta`, `.header`) splits the record and makes
+  `tail -f` consumers confused; a prefix line keeps everything
+  in one stream and is greppable.
+- **`#` prefix.** Standard comment marker; matches `grep -v '^#'`
+  / `grep '^#'` conventions every shell user already knows.
+  Downstream `tail -f` consumers can recognise and ignore.
+- **Pure `_format_meta` helper.** Same shape as
+  `_source_size` / `_source_stats` / `_source_words` in
+  `paw-zoom` — pure function, injectable `now` kwarg, no I/O
+  — so the format is testable without touching a real clock.
+- **Public `write_meta(fh, args, *, now=None)`.** Centralises
+  the write + flush so `main` doesn't have to branch on
+  `transcript_fh is None`. OSError is raised back to the
+  caller (vs. swallowed in `_transcript_writer`'s closure)
+  because the header is a one-shot — if it fails we want the
+  user to know, but the spoken output is still the source of
+  truth, so `main` reports on stderr and does NOT change the
+  exit code. Same contract the per-line transcript write has.
+- **`shlex.join` for the command, not manual quoting.** A
+  pathological argv word containing a literal double-quote
+  still round-trips through a downstream parser, which a
+  hand-rolled `f'"{line}"'` would not survive.
+- **Empty `prefix` is omitted from the header.** No
+  `prefix=` for the no-prefix line, so a downstream consumer
+  can default to `''` without an extra branch. The `prefix`
+  field is the only one that is conditional.
+- **No-op without `--transcript`.** The user can keep the flag
+  in a shell alias for when they add the log path later,
+  matching the "discovery flag, write if you can" rule every
+  other `paw-zoom` discovery flag follows.
+
+**Files touched.**
+
+- `src/whisperpaw/watch.py` — added `from datetime import
+  datetime as _datetime, timezone as _timezone` (re-exported
+  as `datetime` / `timezone` so tests can pin them), new
+  `--meta` flag in `build_parser()`, new pure helper
+  `_format_meta(args, *, now=None)`, new public
+  `write_meta(fh, args, *, now=None)`, and a single
+  `try/except OSError` block in `main` between
+  `open_transcript` and `_run`.
+- `tests/test_watch.py` — 15 new tests: parse default-off /
+  parse flag-on; `_format_meta` single-line-hash-prefix /
+  includes-timestamp-cmd-flags / shlex-joins-whitespace /
+  empty-prefix-omitted; `write_meta` noop-on-None /
+  writes-line-then-newline-then-flushes; main end-to-end:
+  off-is-bit-identical / on-writes-header-before-first-line /
+  no-transcript-is-silent / follow-writes-header-in-streaming-mode
+  / write-failure-does-not-change-exit-code /
+  dry-run-still-writes-header / prefix-is-included-in-header.
+- `src/whisperpaw/completions/whisperpaw.{bash,zsh,fish,nu}`
+  — regenerated so `--meta` shows up in Tab completion for
+  every shell. The byte-identity test in
+  `tests/test_completions.py` caught the drift and forced the
+  regen, as it has for every prior tick.
+
+**Total: 814/814 green** (15 new + 799 existing). Pure stdlib,
+no new pip deps, no telemetry, no network. The new helpers
+live next to `_transcript_writer` in `whisperpaw/watch.py` so
+the "transcript open / write" public surface stays co-located.
+
+**Next tick.** `paw-watch` is now session-aware: prefix /
+transcript / meta. Natural follow-ups for `paw-watch`: a
+`--separator` to control what comes between concatenated
+lines from `--include-stderr` streams (today it's the same
+`[prefix] ` shape for both), or a `--summary` that writes
+*one* per-session footer line at close (lines spoken / TTS
+errors / child exit code) so a log is self-describing from
+*both* ends. For other tools: still a fourth sound pack on
+standby (needs a user request) and the chained
+`--list-capture-info` introspection on `paw-zoom` (already
+mentioned last tick). None of those is ready today; will
+pick based on what the user actually needs next. 🐾

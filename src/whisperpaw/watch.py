@@ -41,8 +41,15 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from datetime import datetime as _datetime
+from datetime import timezone as _timezone
 from pathlib import Path
 from typing import Iterator
+
+# Re-export under the canonical names so tests can pin them and the
+# module has a single, well-known symbol for "now".
+datetime = _datetime
+timezone = _timezone
 
 # Reuse the TTS chain from paw-read. Importing it here (rather than
 # inside _speak_line) keeps the import graph trivial and means the
@@ -165,6 +172,25 @@ def build_parser() -> argparse.ArgumentParser:
             "prefix is applied in speak and dry-run mode, and to the "
             "transcript, so the on-screen / on-disk record stays "
             "consistent across all three sinks."
+        ),
+    )
+    parser.add_argument(
+        "--meta",
+        action="store_true",
+        help=(
+            "Write a single ``# paw-watch session: …`` header line to "
+            "``--transcript`` at open, recording the session clock "
+            "(UTC, ISO-8601), the full command, and the runtime flags "
+            "(prefix / rate / volume / max_lines / follow / dry_run). "
+            "The transcript stays self-describing after the fact, so "
+            "a log shared across sessions can be re-parsed by session "
+            "(``grep '^#'`` picks the headers; ``grep -v '^#'`` picks "
+            "the spoken rows). Header lines are prefixed with ``#`` "
+            "so a downstream ``tail -f`` consumer can recognise and "
+            "ignore them. No-op without ``--transcript`` (a flag the "
+            "user might keep in a shell alias for when they add the "
+            "log path). Off by default — without the flag the "
+            "transcript is bit-identical to the pre-``--meta`` code."
         ),
     )
     return parser
@@ -480,6 +506,86 @@ def _transcript_writer(fh):
     return _write
 
 
+# ---------------------------------------------------------------------------
+# Meta header (``--meta``)
+# ---------------------------------------------------------------------------
+
+
+def _format_meta(args: argparse.Namespace, *, now=None) -> str:
+    """Return the single-line ``# …`` header for ``--meta``.
+
+    The header is the *first* line of the transcript, so the log is
+    self-describing after the fact: a reader can run ``grep '^#'`` to
+    pick the session headers and ``grep -v '^#'`` to pick the spoken
+    rows. Fields are emitted in a fixed, parseable order so a
+    downstream consumer can split on whitespace and re-build the
+    session state without re-reading the original CLI.
+
+    The clock is UTC ISO-8601 with a trailing ``Z`` (the same shape
+    ``date -u +%FT%TZ`` emits on every POSIX shell), so the log
+    doesn't depend on the runner's local timezone. ``now`` defaults
+    to ``datetime.now(tz=timezone.utc)``; the kwarg is the injection
+    point for tests that need a stable timestamp.
+
+    The command is wrapped in shell-quotes (``cmd="make test"`` for
+    plain words, ``cmd=echo 'hello world'`` for whitespace-bearing
+    args) via :func:`shlex.join` so a downstream parser can re-split
+    it round-trip, and so a pathological argument containing shell
+    metacharacters still parses cleanly. Spaces in ``argv`` don't
+    break grep because the joined string is the value of a single
+    field (``cmd=…``).
+
+    ``prefix`` is omitted from the header entirely when empty, so the
+    no-prefix line stays tight and a downstream consumer can default
+    to the empty string without an extra branch.
+    """
+    if now is None:
+        now = datetime.now(tz=timezone.utc)
+    # ``isoformat(timespec="seconds")`` gives us ``2026-09-28T14:55:00+00:00``;
+    # the trailing ``+00:00`` is the ISO-8601 form of UTC, but the
+    # conventional single-character ``Z`` is shorter and what
+    # ``date -u +%FT%TZ`` emits, so we swap it for grep-friendliness.
+    ts = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    import shlex
+
+    cmd_str = shlex.join(args.cmd)
+    parts: list[str] = [
+        "paw-watch",
+        "session",
+        f"@{ts}",
+        f"cmd={cmd_str}",
+        f"rate={int(args.rate) if float(args.rate).is_integer() else args.rate}",
+        f"volume={args.volume}",
+        f"max_lines={args.max_lines}",
+        f"follow={args.follow}",
+        f"dry_run={args.dry_run}",
+    ]
+    if args.prefix:
+        parts.append(f"prefix={args.prefix}")
+    return "# " + " ".join(parts)
+
+
+def write_meta(fh, args: argparse.Namespace, *, now=None) -> None:
+    """Write the ``--meta`` header to ``fh``, or no-op if ``fh`` is None.
+
+    Centralises the write + flush so :func:`main` doesn't have to
+    branch on ``transcript_fh is None``. Failures are *not* swallowed
+    here — the caller (``main``) wraps the call in a ``try/except
+    OSError`` so a half-broken filesystem can be reported on stderr
+    without aborting the rest of the session. The same write contract
+    :func:`_transcript_writer` uses (write + newline + flush) applies
+    here so a half-killed session still leaves a parseable header
+    behind.
+    """
+    if fh is None:
+        return None
+    line = _format_meta(args, now=now)
+    fh.write(line)
+    fh.write("\n")
+    fh.flush()
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(argv)
@@ -500,6 +606,20 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    # If ``--meta`` was passed AND we have a transcript to write into,
+    # write the session header *before* the first spoken row so the
+    # log is self-describing from the very first byte. A failed write
+    # is loud on stderr but does NOT change the exit code (the spoken
+    # / printed output is the source of truth — same contract the
+    # per-line transcript write has).
+    if args.meta and transcript_fh is not None:
+        try:
+            write_meta(transcript_fh, args)
+        except OSError as exc:
+            print(
+                f"paw-watch: --meta write failed: {exc}",
+                file=sys.stderr,
+            )
     try:
         return _run(args, transcript_fh)
     finally:
