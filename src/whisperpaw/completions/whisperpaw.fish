@@ -41,6 +41,7 @@ complete -c paw-watch -l dry-run -d 'Print each line that *would* be spoken to s
 complete -c paw-watch -l transcript -d 'Also append every line that is spoken (or, with --dry-run, that would be spoken…'
 complete -c paw-watch -l prefix -d 'Prepend ``[TEXT] `` to every line that is spoken, dry-run-printed, and/or appen…'
 complete -c paw-watch -l meta -d 'Write a single ``# paw-watch session: …`` header line to ``--transcript`` at op…'
+complete -c paw-watch -l meta-end -d 'Write a single ``# paw-watch session end: …`` footer line to ``--transcript`` a…'
 
 # Auto-generated completions for paw-zoom.
 complete -c paw-zoom -l file -d 'Read text from this UTF-8 file instead of positional args.'

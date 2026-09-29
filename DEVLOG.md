@@ -3002,3 +3002,65 @@ standby (needs a user request) and the chained
 `--list-capture-info` introspection on `paw-zoom` (already
 mentioned last tick). None of those is ready today; will
 pick based on what the user actually needs next. 🐾
+
+---
+
+## 2026-10-05 — paw-watch: finish `--meta-end` (per-session footer)
+
+**What changed.** Picked up the half-finished `--meta-end` feature
+that the previous tick left in the working tree (parser entry +
+pure helpers, but no main() wiring and no tests). Wired it into
+`main()` and added 24 tests. Net delta:
+
+- `src/whisperpaw/watch.py` — `from time import monotonic as _time` +
+  module-level `monotonic = _time.monotonic` re-export (so tests
+  can pin a fake clock). `_run` / `_run_batch` / `_run_streaming`
+  refactored to return `(exit_code, spoken)` so `main` doesn't
+  have to branch on mode. `main` now: starts the duration clock
+  AFTER the transcript handle is open and AFTER `--meta` has had
+  a chance to write (so the measured window is "the work", not
+  the bookkeeping on either side), captures the run's exit code
+  + spoken count, and in a `finally` block writes the footer
+  (no-op without `--transcript` and without `--meta-end`; same
+  try/except-OSError-on-write-failure-doesn't-change-exit-code
+  contract `--meta` and the per-line transcript write have).
+- `tests/test_watch.py` — 24 new tests: 2 parse default-off /
+  flag-on; 3 `_format_duration` low-level (zero/negative,
+  sub-minute, minute-and-over); 3 `_format_meta_end` low-level
+  (single-line-hash-prefix, includes-timestamp-cmd-exit-spoken-
+  duration, non-zero-exit); 2 `write_meta_end` low-level
+  (noop-on-None, write-newline-flush); 14 main() end-to-end
+  (off-is-bit-identical, on-writes-footer-after-last-line,
+  no-transcript-is-silent, no-meta-still-writes-footer,
+  reflects-non-zero-exit, counts-spoken-through-max-lines,
+  follow-writes-footer, dry-run-still-writes-footer,
+  write-failure-does-not-change-exit, prefix-includes-cmd-in-
+  footer, plus a couple of regression guards).
+- `src/whisperpaw/completions/whisperpaw.{bash,zsh,fish,nu}` —
+  regenerated so `--meta-end` shows up in Tab completion for
+  every shell. The byte-identity test in `test_completions.py`
+  caught the drift on first run (it had been failing since the
+  last tick) and forced the regen.
+
+**Why.** `--meta` (the header) is the open side of the bracket;
+without a matching footer the log is self-describing from the
+*top* only — `grep '^#'` picks the header, but the close clock,
+the exit code, the spoken count, and the wall-clock duration are
+all implicit. `--meta-end` makes the log self-describing from
+*both* ends and gives a downstream `grep '^#'` consumer the
+fields it needs to compute per-session totals (duration, lines
+spoken, exit code) without re-reading the original CLI. The
+flag is independently useful even without `--meta` (it records
+exit + spoken + duration even if the user didn't want an open
+header), so they're decoupled.
+
+**What's next.** `paw-watch` is now session-aware: prefix,
+transcript, meta (open), meta-end (close). The two open/close
+markers are the most natural seam for a small companion
+`paw-watch-session` log-summarising tool: a one-shot
+`grep '^#' log | sed -n '1~2p;2~2p' | awk …` that pairs headers
+and footers, computes per-session totals, and prints them
+sorted by wall-clock duration. Or, on a different tool:
+`paw-zoom` still has the chained `--list-capture-info`
+introspection on the wishlist. Will pick based on the user's
+next request. 🐾

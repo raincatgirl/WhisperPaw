@@ -130,7 +130,14 @@ Legend: 🐣 planned · 🛠 in progress · ✅ shipped · 🐛 buggy
   `--dry-run` (print what would be spoken to stdout, one line per
   line, instead of calling the TTS engine — the watched command still
   runs, and the child's exit code is still mirrored),
-  `--quiet`.
+  `--quiet`,
+  `--transcript PATH` (accessibility log — append every spoken line),
+  `--prefix TEXT` (tag every spoken / dry-run / transcript line with
+  ``[TEXT] `` so multiple concurrent sessions sharing one log are
+  grep-distinguishable),
+  `--meta` (per-session transcript header, written at open),
+  `--meta-end` (per-session transcript footer, written at close — the
+  pair that brackets a session from both ends).
 - Two execution paths:
   - **batch** (default) uses `subprocess.run(..., capture_output=True)`
     via the `_spawn` adapter. The whole output is collected first,
@@ -165,6 +172,68 @@ useful even on a hard kill. ``_emit_line`` got a new
 contract. A failed write is loud on stderr but does NOT change the
 exit code — the spoken/printed output is the source of truth, and
 a flaky filesystem should not break the user's pipeline.
+
+``--meta`` writes a single ``# paw-watch session: …`` header at
+open — the session clock (UTC, ISO-8601 with `Z` suffix), the full
+command (via `shlex.join` so a whitespace-bearing argv round-trips),
+and the runtime flags (`rate` / `volume` / `max_lines` / `follow` /
+`dry_run`, with `prefix` appended only when non-empty). The header
+is the *first* line of the log so the file is self-describing from
+the very first byte — `grep '^#' session.log` picks the headers,
+`grep -v '^#' session.log` picks the spoken rows, and a long
+``--follow`` whose process takes minutes to produce its first row
+still has a parseable header at the top. New public helpers:
+:func:`whisperpaw.watch._format_meta` (pure — derives the `now` kwarg,
+formats the UTC timestamp with `strftime('%Y-%m-%dT%H:%M:%SZ')`, joins
+the argv with `shlex.join`, and emits the field list in a fixed
+order so a downstream parser can `shlex.split` it back) and
+:func:`whisperpaw.watch.write_meta` (writes `# …\n` + flush, no-op
+when `fh is None`, lets the caller own the OSError path). `main()`
+calls `write_meta(transcript_fh, args)` immediately after
+`open_transcript` succeeds and wraps the call in `try/except OSError`
+so a half-broken filesystem reports on stderr but does NOT change
+the exit code (same contract the per-line transcript write has).
+`--meta` without `--transcript` is a silent no-op so the user can
+keep the flag in a shell alias for when they add the log path.
+
+``--meta-end`` is the close-time pair: a single
+``# paw-watch session end: …`` footer is written to `--transcript`
+at session close, recording the close clock (UTC, ISO-8601), the
+watched command's exit code, how many lines were spoken (or, with
+``--dry-run``, would have been), and the wall-clock duration as an
+ISO-8601 interval (``PT<SS>S`` for sub-minute sessions,
+``PT<MM>M<SS>S`` for anything over a minute — sub-second precision
+is dropped because the duration is a wall-clock measurement, not
+a benchmark). The footer is the *last* line of the transcript, so
+a session bracketed by ``--meta`` (open) and ``--meta-end`` (close)
+is fully self-describing from both ends — `grep '^#' session.log`
+picks every header AND every footer, and a downstream consumer can
+pair the two by ``cmd=`` to compute per-session totals (duration,
+lines spoken, exit code) without re-reading the original CLI. New
+public helpers in :mod:`whisperpaw.watch`: :func:`_format_duration`
+(pure ISO-8601 duration formatter — zero / negative values short-
+circuit to `PT0S` as a defensive boundary check),
+:func:`_format_meta_end` (pure — derives the `now` kwarg, builds the
+field list in a fixed order, `shlex.join`s the argv, computes the
+duration from the `started_at` / `finished_at` monotonic ticks);
+:func:`write_meta_end` (writes the footer + newline + flush, no-op
+when `fh is None`, lets the caller own the OSError path). The
+duration clock uses the module-level :data:`monotonic` symbol (a
+re-export of :func:`time.monotonic`) so tests can pin a fake clock
+and so a mid-session NTP slew cannot extend the wall-clock window.
+``_run`` / ``_run_batch`` / ``_run_streaming`` were refactored to
+return ``(exit_code, spoken)`` so `main` does not have to branch on
+mode. `main()` starts the duration clock AFTER the transcript
+handle is open AND AFTER `--meta` has had a chance to write (so the
+measured window is "the work", not the bookkeeping on either side),
+then writes the footer in a `finally` block so a TTS error, a
+failing child, or a `KeyboardInterrupt` mid-loop still leaves a
+parseable session end behind. `--meta-end` without `--transcript`
+is a silent no-op (same convention `--meta` has); `--meta-end`
+without `--meta` still works (the footer is independently useful
+for recording exit code + spoken count + duration even without an
+open-time header). A failed write is loud on stderr but does NOT
+change the exit code — the spoken output is the source of truth.
 
 ---
 
@@ -797,6 +866,7 @@ A new entry is appended every time the cron job wakes up. This is the project's 
 - 2026-09-22 — paw-watch: add `--transcript PATH` flag (accessibility log). For every line that is spoken (or, with `--dry-run`, that would have been spoken) the same string is also appended to PATH, one line per row, UTF-8, opened in **append mode** — so a long `--follow` run leaves a real-time, tail-able record behind, and two `paw-watch` invocations against the same file concatenate rather than overwrite. The file is created on first write; the parent directory must already exist (validated at parse time, exit 2 with a clear stderr message). New public helpers: `_validate_transcript_path(path)` (parent-dir-exists check, raises SystemExit(2) on miss), `open_transcript(path)` (returns the append-mode file handle or None when no path was requested), and `_transcript_writer(fh)` (closure that writes `line + "\n"` and flushes after every line so the log is useful even on a hard kill). `_emit_line` got a new `transcript_write` keyword (`callable[[str], None]` or None) so the batch and streaming paths share the same write contract. A failed write is loud on stderr but does NOT change the exit code (the spoken output is the source of truth). `main()` was split into `main` (owns the transcript handle and the `try/finally` close) + `_run` (banner + dispatch) + `_run_batch` + `_run_streaming` so both modes close the handle the same way. 17 new tests in test_watch.py (parse default / parse accepts path / parse rejects missing parent dir; open_transcript None / creates file / appends to existing; _transcript_writer None / writes-line-then-flushes; _emit_line writes-before-speaking / write-failure-does-not-change-exit-code; main end-to-end: speaks-and-writes / dry-run-and-writes / respects-max-lines / appends-across-runs / follow-and-writes / closes-handle-on-tts-error / directory-as-transcript-path-exits-2). 781/781 green. Static completion files regenerated so `--transcript` shows up in Tab completion for every shell.
 - 2026-09-28 — paw-watch: add `--prefix TEXT` flag (line tag for shared logs). For every line that is spoken, dry-run-printed, or appended to `--transcript`, the line is prepended with ``[TEXT] `` (empty string = no change, bit-identical to the no-flag code). Primary use case: tagging a `paw-watch` session so multiple concurrent invocations sharing a single `--transcript` log file can be told apart at a glance (``paw-watch --prefix build --transcript shared.log -- npm run build`` writes ``[build] compiling...`` to the log; a sibling ``paw-watch --prefix test --transcript shared.log -- npm test`` writes ``[test] running suite...`` to the same log). New public helper `_apply_prefix(line, prefix)` (pure, empty-prefix short-circuits to no-op so the no-flag path is bit-identical). `_emit_line` got a new `prefix: str = ""` keyword; the transformation is applied ONCE in `_emit_line` so the speak / dry-run / transcript sinks cannot drift. The batch and streaming loops both pass `prefix=args.prefix` through to every `_emit_line` call. Composes cleanly with `--transcript` (tagged line is what hits the file), `--dry-run` (tagged line is what prints), `--follow` (tagged line is what speaks + writes per streamed row), `--max-lines` (the cap fires on the Nth *original* line; every emitted line is tagged), and `--quiet` (banner is suppressed but the per-line tag is still applied). 18 new tests in test_watch.py (parse: default-empty / accepts-label / composes-with-transcript; _apply_prefix: empty-noop / brackets-format / unicode-line; _emit_line: speak-mode-tags / dry-run-tags / empty-prefix-bit-identical / prefix-applied-before-transcript-write; main end-to-end: tags-every-spoken-line / empty-by-default / dry-run-prints-tagged / transcript-writes-tagged / two-concurrent-paw-watches-share-one-transcript / follow-tags-streamed-lines / respects-max-lines / propagates-tts-error). 799/799 green. Static completion files regenerated so `--prefix` shows up in Tab completion for every shell.
 - 2026-10-04 — paw-watch: add `--meta` flag (per-session transcript header). When `--transcript PATH` and `--meta` are combined, a single ``# paw-watch session: …`` header is written to PATH at open, recording the session clock (UTC, ISO-8601 with `Z` suffix), the full command (via `shlex.join` so a whitespace-bearing argv round-trips), and the runtime flags (`rate` / `volume` / `max_lines` / `follow` / `dry_run`, with `prefix` appended only when non-empty). The header is the *first* line of the log so the file is self-describing after the fact — `grep '^#' session.log` picks the headers, `grep -v '^#' session.log` picks the spoken rows, and a long `--follow` whose process takes minutes to produce its first row still has a parseable header at the top. New public helpers in `whisperpaw.watch`: `_format_meta(args, *, now=None)` (pure — derives the `now` kwarg, formats the UTC timestamp with `strftime('%Y-%m-%dT%H:%M:%SZ')`, joins the argv with `shlex.join`, and emits the field list in a fixed order so a downstream parser can `shlex.split` it back); `write_meta(fh, args, *, now=None)` (writes `# …\n` + flush, no-op when `fh is None`, lets the caller own the OSError path). `main()` calls `write_meta(transcript_fh, args)` immediately after `open_transcript` succeeds and wraps the call in `try/except OSError` so a half-broken filesystem reports on stderr but does NOT change the exit code (the spoken/printed output is still the source of truth — same contract the per-line transcript write has). `--meta` without `--transcript` is a silent no-op so the user can keep the flag in a shell alias for when they add the log path. 15 new tests in test_watch.py (parse default-off / parse flag-on; _format_meta single-line-hash-prefix / includes-timestamp-cmd-flags / shlex-joins-whitespace / empty-prefix-omitted; write_meta noop-on-None / writes-line-then-newline-then-flushes; main end-to-end: off-is-bit-identical / on-writes-header-before-first-line / no-transcript-is-silent / follow-writes-header-in-streaming-mode / write-failure-does-not-change-exit-code / dry-run-still-writes-header / prefix-is-included-in-header). 814/814 green. Static completion files regenerated so `--meta` shows up in Tab completion for every shell.
+- 2026-10-05 — paw-watch: finish `--meta-end` flag (per-session transcript footer). Pairs with the `--meta` header so a session is fully bracketed from both ends. New helpers: `_format_duration(seconds) -> str` (pure ISO-8601 formatter, `PT<SS>S` sub-minute, `PT<MM>M<SS>S` over a minute, zero/negative short-circuits to `PT0S`); `_format_meta_end(args, *, started_at, finished_at, spoken, exit_code, now=None)` (pure — fixed field order `@<UTC-ISO-8601>` / `exit=N` / `spoken=N` / `duration=PT…S` / `cmd=…` so a downstream parser can `shlex.split` it back); `write_meta_end(fh, args, …)` (write + newline + flush, no-op on `None`); module-level `monotonic = time.monotonic` re-export so tests can pin a fake clock and so a mid-session NTP slew cannot extend the wall-clock window. `_run` / `_run_batch` / `_run_streaming` refactored to return `(exit_code, spoken)` so `main` does not branch on mode. `main` now: starts the duration clock AFTER the transcript handle is open and AFTER `--meta` writes (so the measured window is "the work", not the bookkeeping on either side), captures the run's exit code + spoken count, and in `finally` writes the footer (no-op without `--transcript` and without `--meta-end`; same try/except-OSError-on-write-failure-doesn't-change-exit-code contract `--meta` and the per-line transcript write have). `--meta-end` without `--transcript` is a silent no-op (same convention `--meta` has); `--meta-end` without `--meta` still works (the footer alone is a valid one-shot session log). 24 new tests in test_watch.py (2 parse default-off / flag-on; 3 _format_duration low-level covering zero/negative/sub-minute/minute-and-over; 3 _format_meta_end low-level covering single-line-hash-prefix / includes-timestamp-cmd-exit-spoken-duration / non-zero-exit; 2 write_meta_end low-level covering noop-on-None / write-newline-flush; 14 main() end-to-end covering off-is-bit-identical / on-writes-footer-after-last-line / no-transcript-is-silent / no-meta-still-writes-footer / reflects-non-zero-exit / counts-spoken-through-max-lines / follow-writes-footer / dry-run-still-writes-footer / write-failure-does-not-change-exit / prefix-includes-cmd-in-footer / compose-with-meta / duration-from-fake-monotonic). 834/834 green. Static completion files regenerated so `--meta-end` shows up in Tab completion for every shell.
 <!-- TICK-LOG-END -->
 
 (Updated 2026-09-17: `paw-zoom` v0.2 ships the screen-capture

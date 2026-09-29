@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import time as _time
 from datetime import datetime as _datetime
 from datetime import timezone as _timezone
 from pathlib import Path
@@ -50,6 +51,11 @@ from typing import Iterator
 # module has a single, well-known symbol for "now".
 datetime = _datetime
 timezone = _timezone
+#: The monotonic clock used for ``--meta-end`` duration measurement.
+#: Monotonic is immune to NTP slews, so the duration field is stable
+#: even if the system clock is corrected mid-session. Tests pin this
+#: symbol to inject a fake ``time`` callable.
+monotonic = _time.monotonic
 
 # Reuse the TTS chain from paw-read. Importing it here (rather than
 # inside _speak_line) keeps the import graph trivial and means the
@@ -191,6 +197,29 @@ def build_parser() -> argparse.ArgumentParser:
             "user might keep in a shell alias for when they add the "
             "log path). Off by default — without the flag the "
             "transcript is bit-identical to the pre-``--meta`` code."
+        ),
+    )
+    parser.add_argument(
+        "--meta-end",
+        action="store_true",
+        help=(
+            "Write a single ``# paw-watch session end: …`` footer line "
+            "to ``--transcript`` at close, recording the session clock "
+            "(UTC, ISO-8601), the watched command's exit code, how many "
+            "lines were spoken (or would have been, in ``--dry-run``), "
+            "and the wall-clock duration as an ISO-8601 interval. The "
+            "footer pairs with ``--meta``: a session opened and closed "
+            "by the same two flags is fully bracketed in the log, so a "
+            "downstream ``grep '^#'`` consumer can pair headers with "
+            "footers and compute per-session totals. No-op without "
+            "``--meta`` (the flag the user might keep in an alias for "
+            "when they enable session headers) and no-op without "
+            "``--transcript`` (the same convention ``--meta`` has). "
+            "The footer is written from a ``finally`` block so a TTS "
+            "error, a failing child, or a ``KeyboardInterrupt`` mid-"
+            "loop still leaves a parseable session end behind. Off by "
+            "default — without the flag the transcript is bit-identical "
+            "to the pre-``--meta-end`` code."
         ),
     )
     return parser
@@ -586,6 +615,129 @@ def write_meta(fh, args: argparse.Namespace, *, now=None) -> None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Meta end footer (``--meta-end``)
+# ---------------------------------------------------------------------------
+
+
+def _format_duration(seconds: float) -> str:
+    """Return an ISO-8601 duration string for ``seconds``.
+
+    The format is ``PT<whole-seconds>S`` for a sub-minute session and
+    ``PT<MM>MS<S>S`` for anything over a minute, matching the shape
+    ``date -u +%FT%TZ``'s sibling ``date -u +%FT%T`` users expect.
+    Sub-second precision is dropped (the duration is a wall-clock
+    measurement, not a benchmark) so two sessions that differ by a
+    millisecond still produce identical footers — easier to grep,
+    easier to compare. Negative or zero values short-circuit to
+    ``PT0S`` (defensive boundary check; a real session can never
+    produce a negative duration).
+    """
+    if seconds <= 0:
+        return "PT0S"
+    total = int(seconds)
+    minutes, secs = divmod(total, 60)
+    if minutes == 0:
+        return f"PT{secs}S"
+    return f"PT{minutes}M{secs}S"
+
+
+def _format_meta_end(
+    args: argparse.Namespace,
+    *,
+    started_at: float,
+    finished_at: float,
+    spoken: int,
+    exit_code: int,
+    now=None,
+) -> str:
+    """Return the single-line ``# …`` footer for ``--meta-end``.
+
+    The footer is the *last* line of the transcript, so a session
+    bracketed by ``--meta`` (open) and ``--meta-end`` (close) is fully
+    self-describing after the fact: a reader can run ``grep '^#'`` to
+    pick the session markers, and a downstream consumer can pair the
+    two by ``cmd=`` to compute per-session totals (duration, lines
+    spoken, exit code) without re-reading the original CLI.
+
+    Fields, in a fixed parseable order:
+
+    - ``@<UTC-ISO-8601>`` — the close clock (the open clock lives in
+      the ``--meta`` header, paired by ``cmd=``).
+    - ``exit=N`` — the watched command's exit code (``0`` for ok,
+      non-zero for failure; the TTS error code surfaces as
+      ``exit=1`` — same value :func:`main` already returns, so the
+      footer mirrors the user-visible exit).
+    - ``spoken=N`` — the number of lines that were spoken (or, with
+      ``--dry-run``, would have been spoken).
+    - ``duration=PT…S`` — wall-clock seconds from open to close, in
+      ISO-8601 interval form.
+    - ``cmd=…`` — the joined command, ``shlex.join``-quoted so a
+      whitespace-bearing argv round-trips.
+
+    ``now`` defaults to ``datetime.now(tz=timezone.utc)``; the kwarg
+    is the injection point for tests that need a stable timestamp.
+    ``started_at`` / ``finished_at`` are the ``time.monotonic()``
+    ticks; the difference is the duration field.
+    """
+    if now is None:
+        now = datetime.now(tz=timezone.utc)
+    ts = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    import shlex
+
+    cmd_str = shlex.join(args.cmd)
+    duration = _format_duration(finished_at - started_at)
+    parts: list[str] = [
+        "paw-watch",
+        "session",
+        "end",
+        f"@{ts}",
+        f"exit={exit_code}",
+        f"spoken={spoken}",
+        f"duration={duration}",
+        f"cmd={cmd_str}",
+    ]
+    return "# " + " ".join(parts)
+
+
+def write_meta_end(
+    fh,
+    args: argparse.Namespace,
+    *,
+    started_at: float,
+    finished_at: float,
+    spoken: int,
+    exit_code: int,
+    now=None,
+) -> None:
+    """Write the ``--meta-end`` footer to ``fh``, or no-op if ``fh`` is None.
+
+    Centralises the write + flush so :func:`main` doesn't have to
+    branch on ``transcript_fh is None`` and on the ``--meta`` /
+    ``--transcript`` matrix. Failures are *not* swallowed here — the
+    caller (``main``) wraps the call in a ``try/except OSError`` so a
+    half-broken filesystem can be reported on stderr without aborting
+    the rest of the cleanup. The same write contract
+    :func:`_transcript_writer` and :func:`write_meta` use (write +
+    newline + flush) applies here so a half-killed session still
+    leaves a parseable footer behind.
+    """
+    if fh is None:
+        return None
+    line = _format_meta_end(
+        args,
+        started_at=started_at,
+        finished_at=finished_at,
+        spoken=spoken,
+        exit_code=exit_code,
+        now=now,
+    )
+    fh.write(line)
+    fh.write("\n")
+    fh.flush()
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(argv)
@@ -620,14 +772,55 @@ def main(argv: list[str] | None = None) -> int:
                 f"paw-watch: --meta write failed: {exc}",
                 file=sys.stderr,
             )
+    # Start the duration clock AFTER the transcript handle is open
+    # and AFTER --meta has had a chance to write, so the measured
+    # window is "the work" — spawning, reading, speaking, draining —
+    # not the bookkeeping on either side. The clock uses the
+    # :data:`monotonic` symbol so tests can pin a fake and so a
+    # mid-session NTP slew cannot extend the wall-clock window
+    # beyond what the user actually waited.
+    started_at = monotonic()
+    exit_code = 0
+    spoken = 0
     try:
-        return _run(args, transcript_fh)
+        exit_code, spoken = _run(args, transcript_fh)
     finally:
+        # --meta-end writes a single ``# paw-watch session end: …``
+        # footer (timestamp + exit + spoken + duration + cmd) so a
+        # log bracketed by ``--meta`` and ``--meta-end`` is fully
+        # self-describing from *both* ends. The footer is the LAST
+        # line of the transcript, so it lands after every spoken
+        # row and is easy to grep with ``tail -n 1`` /
+        # ``grep '^# paw-watch session end'``. The flag is a no-op
+        # without --transcript (the same convention --meta has), so
+        # a user who keeps the flag in a shell alias and forgets the
+        # log path pays nothing. A failed write is loud on stderr
+        # but does NOT change the exit code — the spoken output is
+        # the source of truth, and a flaky filesystem should not
+        # break the user's pipeline. The call lands in ``finally``
+        # so a TTS error, a failing child, or a ``KeyboardInterrupt``
+        # mid-loop still leaves a parseable session end behind.
+        if args.meta_end and transcript_fh is not None:
+            try:
+                write_meta_end(
+                    transcript_fh,
+                    args,
+                    started_at=started_at,
+                    finished_at=monotonic(),
+                    spoken=spoken,
+                    exit_code=exit_code,
+                )
+            except OSError as exc:
+                print(
+                    f"paw-watch: --meta-end write failed: {exc}",
+                    file=sys.stderr,
+                )
         if transcript_fh is not None:
             transcript_fh.close()
+    return exit_code
 
 
-def _run(args: argparse.Namespace, transcript_fh) -> int:
+def _run(args: argparse.Namespace, transcript_fh) -> tuple[int, int]:
     """Dispatch batch vs. ``--follow`` and own the announcement banner.
 
     Splits the entry point so the transcript handle is opened /
@@ -636,6 +829,13 @@ def _run(args: argparse.Namespace, transcript_fh) -> int:
     :func:`_run_streaming`. The ``transcript_write`` closure is
     built here so both modes see the same "what to do with each
     line" contract.
+
+    Returns ``(exit_code, spoken)``: ``exit_code`` is the value
+    :func:`main` will return to the shell, ``spoken`` is the count
+    of lines that were (or, with ``--dry-run``, would have been)
+    spoken — the per-session line count the ``--meta-end`` footer
+    embeds. Batch and streaming both report it the same way so
+    :func:`main` does not have to branch on mode.
     """
     if not args.quiet:
         mode = "follow" if args.follow else "tail"
@@ -651,16 +851,16 @@ def _run(args: argparse.Namespace, transcript_fh) -> int:
     return _run_batch(args, writer)
 
 
-def _run_batch(args: argparse.Namespace, writer) -> int:
+def _run_batch(args: argparse.Namespace, writer) -> tuple[int, int]:
     """Batch path: spawn, collect stdout, speak each line in order."""
     try:
         completed = _spawn(args.cmd, include_stderr=args.include_stderr)
     except FileNotFoundError as exc:
         print(f"paw-watch: command not found: {exc.filename or args.cmd[0]}", file=sys.stderr)
-        return 2
+        return 2, 0
     except OSError as exc:
         print(f"paw-watch: could not spawn {args.cmd[0]!r}: {exc}", file=sys.stderr)
-        return 2
+        return 2, 0
 
     # When --include-stderr was set, _spawn redirected stderr into
     # stdout, so completed.stderr is always empty here. We only feed
@@ -704,13 +904,13 @@ def _run_batch(args: argparse.Namespace, writer) -> int:
     # failed child is the only failure signal -- which is what `set -e`
     # scripts want.
     if completed.returncode != 0:
-        return completed.returncode
+        return completed.returncode, spoken
     if tts_error:
-        return 1
-    return 0
+        return 1, spoken
+    return 0, spoken
 
 
-def _run_streaming(args: argparse.Namespace, writer) -> int:
+def _run_streaming(args: argparse.Namespace, writer) -> tuple[int, int]:
     """``--follow`` mode: speak each new stdout line as the child produces it.
 
     We open the child with :func:`_popen` and iterate ``stdout_iter()``
@@ -730,10 +930,10 @@ def _run_streaming(args: argparse.Namespace, writer) -> int:
         proc = _popen(args.cmd, include_stderr=args.include_stderr)
     except FileNotFoundError as exc:
         print(f"paw-watch: command not found: {exc.filename or args.cmd[0]}", file=sys.stderr)
-        return 2
+        return 2, 0
     except OSError as exc:
         print(f"paw-watch: could not spawn {args.cmd[0]!r}: {exc}", file=sys.stderr)
-        return 2
+        return 2, 0
 
     buffer = _LineBuffer()
     spoken = 0
@@ -779,10 +979,10 @@ def _run_streaming(args: argparse.Namespace, writer) -> int:
         returncode = proc.wait()
 
     if returncode != 0:
-        return returncode
+        return returncode, spoken
     if tts_error:
-        return 1
-    return 0
+        return 1, spoken
+    return 0, spoken
 
 
 if __name__ == "__main__":

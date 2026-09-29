@@ -1770,3 +1770,499 @@ def test_main_meta_includes_prefix_in_header(monkeypatch, tmp_path) -> None:
     body = log.read_text(encoding="utf-8")
     lines = body.splitlines()
     assert "prefix=build" in lines[0]
+
+
+# --- --meta-end (per-session transcript footer) -------------------------
+
+
+def test_parse_args_meta_end_default_is_off() -> None:
+    """Without ``--meta-end`` the flag stays ``False`` so the no-flag
+    transcript behaviour is bit-identical to the pre-``--meta-end`` code
+    (no trailing footer line in the log)."""
+    args = watch.parse_args(["--transcript", "/tmp/x", "--", "echo"])
+    assert args.meta_end is False
+
+
+def test_parse_args_meta_end_flag_on() -> None:
+    """``--meta-end`` is exposed on the namespace as ``args.meta_end = True``."""
+    args = watch.parse_args(
+        ["--transcript", "/tmp/x", "--meta-end", "--", "echo"]
+    )
+    assert args.meta_end is True
+
+
+def test_format_duration_zero_and_negative_short_circuits_to_pt0s() -> None:
+    """A zero or negative duration is treated as ``PT0S`` — a real session
+    can never produce a negative duration, so the boundary is defensive
+    and the constant is the same for both inputs (no test for a non-zero
+    zero that could drift)."""
+    assert watch._format_duration(0) == "PT0S"
+    assert watch._format_duration(-1) == "PT0S"
+    assert watch._format_duration(-100.5) == "PT0S"
+
+
+def test_format_duration_sub_minute_is_seconds_only() -> None:
+    """Anything strictly less than 60s renders as ``PT<whole-seconds>S``
+    (no minutes field, no trailing ``M``). The whole-second truncation
+    is intentional — the footer is a wall-clock measurement, not a
+    benchmark, so two sessions that differ by a millisecond still
+    produce identical footers."""
+    assert watch._format_duration(0.5) == "PT0S"
+    assert watch._format_duration(1) == "PT1S"
+    assert watch._format_duration(45) == "PT45S"
+    assert watch._format_duration(59.9) == "PT59S"
+
+
+def test_format_duration_minute_and_over_uses_minutes_and_seconds() -> None:
+    """Once the duration crosses a minute boundary the field grows to
+    ``PT<MM>MS<S>S`` (still no sub-second precision, still no
+    hours — a long session is reported in MM:SS, which is what
+    users expect from a footer)."""
+    assert watch._format_duration(60) == "PT1M0S"
+    assert watch._format_duration(61) == "PT1M1S"
+    assert watch._format_duration(125) == "PT2M5S"
+    assert watch._format_duration(3599) == "PT59M59S"
+    assert watch._format_duration(3600) == "PT60M0S"
+
+
+def test_format_meta_end_is_single_line_starting_with_hash() -> None:
+    """The footer is a single line beginning with ``#`` so the transcript
+    stays grep-friendly (``grep '^#'`` picks every header AND every
+    footer) and any downstream ``tail -f`` consumer can recognise
+    and ignore it. Pairs with the ``_format_meta`` header convention."""
+    from argparse import Namespace
+
+    args = Namespace(cmd=["echo", "hi"], prefix="", rate=200.0, volume=1.0)
+    fixed_now = watch._datetime(2026, 9, 29, 9, 0, 0, tzinfo=watch.timezone.utc)
+    line = watch._format_meta_end(
+        args,
+        started_at=0.0,
+        finished_at=10.0,
+        spoken=3,
+        exit_code=0,
+        now=fixed_now,
+    )
+    assert "\n" not in line
+    assert line.startswith("# ")
+
+
+def test_format_meta_end_includes_timestamp_cmd_exit_spoken_duration() -> None:
+    """The footer names every field a downstream consumer needs to pair
+    it with the ``--meta`` header and to compute per-session totals
+    (exit code, lines spoken, wall-clock duration) without re-reading
+    the original CLI."""
+    from argparse import Namespace
+
+    args = Namespace(cmd=["make", "test"], prefix="build", rate=220.0, volume=0.5)
+    fixed_now = watch._datetime(2026, 9, 29, 9, 0, 0, tzinfo=watch.timezone.utc)
+    line = watch._format_meta_end(
+        args,
+        started_at=0.0,
+        finished_at=65.0,
+        spoken=7,
+        exit_code=0,
+        now=fixed_now,
+    )
+    # ISO-8601 UTC timestamp with Z suffix.
+    assert "2026-09-29T09:00:00Z" in line
+    # All five key fields are present with their actual values.
+    assert "exit=0" in line
+    assert "spoken=7" in line
+    # 65s renders as PT1M5S (the over-a-minute shape).
+    assert "duration=PT1M5S" in line
+    # The full command is embedded via shlex.join.
+    assert "cmd=make test" in line
+    # The "session end" keyword pairs with the "session" keyword in --meta.
+    assert "paw-watch" in line
+    assert "session" in line
+    assert "end" in line
+
+
+def test_format_meta_end_reflects_non_zero_exit_code() -> None:
+    """The watched command's exit code is mirrored into the footer so a
+    downstream ``grep '^#'`` consumer can see per-session failure
+    without re-parsing the original CLI. Non-zero values (TTS errors,
+    child failures) appear verbatim — no mapping to / from the user-
+    visible exit code ``main`` returns."""
+    from argparse import Namespace
+
+    args = Namespace(cmd=["x"], prefix="", rate=200.0, volume=1.0)
+    line = watch._format_meta_end(
+        args,
+        started_at=0.0,
+        finished_at=1.0,
+        spoken=1,
+        exit_code=42,
+    )
+    assert "exit=42" in line
+
+
+def test_write_meta_end_is_noop_when_fh_is_none() -> None:
+    """``--meta-end`` without ``--transcript`` is a silent no-op (same
+    convention ``--meta`` has) so a user who keeps the flag in a shell
+    alias and forgets the log path pays nothing."""
+    # The helper must accept None and not raise.
+    watch.write_meta_end(
+        None,
+        _minimal_args(),
+        started_at=0.0,
+        finished_at=1.0,
+        spoken=0,
+        exit_code=0,
+    )
+
+
+def test_write_meta_end_writes_footer_then_newline_then_flushes(tmp_path) -> None:
+    """The footer is written with the same write + newline + flush
+    contract ``_transcript_writer`` and ``write_meta`` use, so a
+    half-killed session still leaves a parseable footer behind."""
+    from argparse import Namespace
+
+    log = tmp_path / "session.log"
+    log.write_text("# header line\nspoken-row\n", encoding="utf-8")
+    fh = open(log, "a", encoding="utf-8")
+    args = Namespace(cmd=["echo"], prefix="", rate=200.0, volume=1.0)
+    watch.write_meta_end(
+        fh,
+        args,
+        started_at=0.0,
+        finished_at=2.0,
+        spoken=1,
+        exit_code=0,
+    )
+    fh.close()
+    body = log.read_text(encoding="utf-8")
+    lines = body.splitlines()
+    assert lines[0] == "# header line"
+    assert lines[1] == "spoken-row"
+    # The footer is the last line.
+    assert lines[-1].startswith("# paw-watch session end")
+    assert "duration=PT2S" in lines[-1]
+    assert "spoken=1" in lines[-1]
+    assert "exit=0" in lines[-1]
+
+
+def _minimal_args() -> "argparse.Namespace":  # type: ignore[name-defined]
+    """Build a bare ``Namespace`` covering the fields ``_format_meta_end``
+    reads. Lets the "noop when fh is None" test stay tiny without
+    importing ``argparse`` at module load time."""
+    from argparse import Namespace
+    return Namespace(cmd=["echo"], prefix="", rate=200.0, volume=1.0)
+
+
+def test_main_meta_end_off_does_not_write_footer(monkeypatch, tmp_path) -> None:
+    """Without ``--meta-end`` the transcript is bit-identical to the
+    pre-``--meta-end`` code: the spoken lines land, and the log
+    ends with the last spoken row — no trailing ``# paw-watch session
+    end`` line."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="row-a\nrow-b\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    log = tmp_path / "session.log"
+    code = watch.main(
+        ["--quiet", "--transcript", str(log), "--", "echo"]
+    )
+    assert code == 0
+    body = log.read_text(encoding="utf-8")
+    assert body == "row-a\nrow-b\n"
+    assert "session end" not in body
+
+
+def test_main_meta_end_on_writes_footer_after_last_line(
+    monkeypatch, tmp_path
+) -> None:
+    """``--meta-end`` writes a single ``# paw-watch session end: …``
+    line as the *last* line of the transcript, so the log is
+    self-describing from both ends. The footer is bracketed by the
+    same ``# `` prefix ``--meta`` uses, and it lands after every
+    spoken row (not in the middle of the stream)."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="row-a\nrow-b\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    # Pin a fake monotonic clock so the duration field is stable.
+    monkeypatch.setattr(watch, "monotonic", lambda: 100.0)
+    log = tmp_path / "session.log"
+    code = watch.main(
+        [
+            "--quiet", "--meta-end",
+            "--transcript", str(log),
+            "--", "echo", "hello",
+        ]
+    )
+    assert code == 0
+    body = log.read_text(encoding="utf-8")
+    lines = body.splitlines()
+    # The first two lines are the spoken rows in order.
+    assert lines[0] == "row-a"
+    assert lines[1] == "row-b"
+    # The footer is the LAST line and starts with the session-end prefix.
+    assert lines[-1].startswith("# paw-watch session end")
+    # The footer embeds the spoken count, the exit code, the cmd, and
+    # the duration. The duration is PT0S because we pinned the
+    # monotonic clock to a single value (started == finished).
+    assert "spoken=2" in lines[-1]
+    assert "exit=0" in lines[-1]
+    assert "cmd=echo hello" in lines[-1]
+
+
+def test_main_meta_end_without_transcript_is_silent(
+    monkeypatch, capsys
+) -> None:
+    """``--meta-end`` without ``--transcript`` is a no-op (same
+    convention ``--meta`` has) so a user who keeps the flag in a
+    shell alias and forgets the log path pays nothing: no error,
+    no spurious stdout / stderr, no exit-code change."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="row\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    code = watch.main(["--quiet", "--meta-end", "--", "echo"])
+    assert code == 0
+    out = capsys.readouterr()
+    # The transcript wasn't open, so nothing related to the footer
+    # was written to stdout or stderr.
+    assert "session end" not in out.out
+    assert "session end" not in out.err
+
+
+def test_main_meta_end_without_meta_still_writes_footer(
+    monkeypatch, tmp_path
+) -> None:
+    """``--meta-end`` does NOT require ``--meta`` — the footer is
+    independently useful (it records exit code, spoken count, and
+    duration even if the user did not request the open-time
+    header). Pairing the two flags is the common case, but the
+    footer alone is still a valid one-shot session log."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="only-row\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    log = tmp_path / "session.log"
+    code = watch.main(
+        [
+            "--quiet", "--meta-end",
+            "--transcript", str(log),
+            "--", "echo",
+        ]
+    )
+    assert code == 0
+    body = log.read_text(encoding="utf-8")
+    lines = body.splitlines()
+    assert lines[0] == "only-row"
+    assert lines[-1].startswith("# paw-watch session end")
+    # And there is NO header line — only the spoken row and the
+    # footer. The footer is the only ``#``-prefixed line.
+    assert sum(1 for ln in lines if ln.startswith("# ")) == 1
+
+
+def test_main_meta_end_reflects_non_zero_exit_code(
+    monkeypatch, tmp_path
+) -> None:
+    """The watcher's exit code (the value the child returned) is
+    mirrored into the footer so a downstream ``grep '^#'`` consumer
+    can see per-session failure without re-running the original
+    CLI. The user-visible exit code (the value ``main`` returns to
+    the shell) is the SAME number, so the footer and the shell
+    agree."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=7, stdout="failed-row\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    log = tmp_path / "session.log"
+    code = watch.main(
+        [
+            "--quiet", "--meta-end",
+            "--transcript", str(log),
+            "--", "false",
+        ]
+    )
+    # The shell sees the child's exit code.
+    assert code == 7
+    body = log.read_text(encoding="utf-8")
+    # The footer mirrors it.
+    assert "exit=7" in body.splitlines()[-1]
+
+
+def test_main_meta_end_counts_spoken_lines_through_max_lines(
+    monkeypatch, tmp_path
+) -> None:
+    """``--meta-end`` reports the number of lines that were ACTUALLY
+    spoken — capped by ``--max-lines`` (a session stopped after N
+    rows should not advertise ``spoken=∞`` in its footer). The
+    count is whatever the loop reached, including the trailing
+    fragment."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout="r1\nr2\nr3\nr4\nr5\n",
+        stderr="",
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    log = tmp_path / "session.log"
+    code = watch.main(
+        [
+            "--quiet", "--meta-end", "--max-lines", "2",
+            "--transcript", str(log),
+            "--", "echo",
+        ]
+    )
+    assert code == 0
+    body = log.read_text(encoding="utf-8")
+    lines = body.splitlines()
+    # Only the first two rows hit the log; the cap fired.
+    assert "r1" in body
+    assert "r2" in body
+    assert "r3" not in body
+    # The footer reports the *actual* spoken count, not the row count.
+    assert "spoken=2" in lines[-1]
+
+
+def test_main_meta_end_follow_writes_footer_in_streaming_mode(
+    monkeypatch, tmp_path
+) -> None:
+    """``--meta-end`` composes with ``--follow``: the footer still
+    lands as the LAST line of the transcript after the streamed
+    rows, so a long-running ``tail -f`` session has a parseable
+    session end behind its data."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+
+    class _FakeStream:
+        def stdout_iter(self):
+            for line in ["s1\n", "s2\n"]:
+                yield line
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(watch, "_popen", lambda *a, **kw: _FakeStream())
+    log = tmp_path / "session.log"
+    code = watch.main(
+        [
+            "--quiet", "--follow", "--meta-end",
+            "--transcript", str(log),
+            "--", "tail", "-f", "x.log",
+        ]
+    )
+    assert code == 0
+    body = log.read_text(encoding="utf-8")
+    lines = body.splitlines()
+    assert lines[0] == "s1"
+    assert lines[1] == "s2"
+    assert lines[-1].startswith("# paw-watch session end")
+    assert "spoken=2" in lines[-1]
+
+
+def test_main_meta_end_dry_run_still_writes_footer(monkeypatch, tmp_path) -> None:
+    """``--dry-run`` does NOT short-circuit ``--meta-end``: the footer
+    is part of the session bookkeeping (per-session totals), not
+    part of the TTS output, so a session that would-have-spoken-N
+    rows still records ``spoken=N`` in its footer."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="a\nb\nc\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    log = tmp_path / "session.log"
+    code = watch.main(
+        [
+            "--quiet", "--dry-run", "--meta-end",
+            "--transcript", str(log),
+            "--", "echo",
+        ]
+    )
+    assert code == 0
+    body = log.read_text(encoding="utf-8")
+    lines = body.splitlines()
+    assert lines[-1].startswith("# paw-watch session end")
+    assert "spoken=3" in lines[-1]
+
+
+def test_main_meta_end_write_failure_does_not_change_exit_code(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """A failed ``--meta-end`` write is loud on stderr but does NOT
+    change the exit code — the spoken/printed output is the source
+    of truth, and a flaky filesystem should not break the user's
+    pipeline. Same contract ``--meta`` and the per-line transcript
+    write have."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="only\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+
+    def _bad_write(*a, **kw):
+        raise OSError("disk full")
+
+    log = tmp_path / "session.log"
+    monkeypatch.setattr(watch, "write_meta_end", _bad_write)
+    code = watch.main(
+        [
+            "--quiet", "--meta-end",
+            "--transcript", str(log),
+            "--", "echo",
+        ]
+    )
+    # Exit code still reflects the success of the underlying run.
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "--meta-end write failed" in err
+    assert "disk full" in err
+
+
+def test_main_meta_end_includes_prefix_in_footer(monkeypatch, tmp_path) -> None:
+    """When ``--prefix TEXT`` and ``--meta-end`` are combined, the
+    footer's ``cmd=`` field still uses ``shlex.join`` on the raw
+    argv (the same field the ``--meta`` header uses), so the
+    open/close markers can be paired by ``cmd=`` downstream. The
+    prefix does not appear in the footer's key=value list — it
+    is *part of* the cmd string, not a flag of its own."""
+    monkeypatch.setattr(
+        watch, "_speak_line", lambda line, rate, volume: 0
+    )
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="r\n", stderr=""
+    )
+    monkeypatch.setattr(watch, "_spawn", lambda *a, **kw: fake)
+    log = tmp_path / "session.log"
+    code = watch.main(
+        [
+            "--quiet", "--meta-end", "--prefix", "ci",
+            "--transcript", str(log),
+            "--", "make", "test",
+        ]
+    )
+    assert code == 0
+    body = log.read_text(encoding="utf-8")
+    footer = body.splitlines()[-1]
+    # The cmd field is the joined argv — same shape the header uses.
+    assert "cmd=make test" in footer
+    # The prefix itself is NOT a key in the footer (it is in --meta,
+    # not --meta-end). We assert the absence of the standalone key
+    # so a future drift is caught.
+    assert "prefix=" not in footer
