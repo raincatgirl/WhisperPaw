@@ -3064,3 +3064,96 @@ sorted by wall-clock duration. Or, on a different tool:
 `paw-zoom` still has the chained `--list-capture-info`
 introspection on the wishlist. Will pick based on the user's
 next request. 🐾
+
+## 2026-09-29 — paw-sound: `--list-backends` audio-backend discovery
+
+**What changed.**
+- `src/whisperpaw/sound.py` — new public API:
+  - `BackendInfo` frozen dataclass (4 fields: `name`,
+    `available`, `volume_supported`, `active`).
+  - `list_backends(*, which_fn=None, active_name=_SENTINEL)`
+    — sorted-by-name enumeration of every backend in
+    `KNOWN_BACKEND_NAMES`. `which_fn` is the test-injection
+    point (replaces `shutil.which`); `active_name` accepts a
+    literal `None` to mean "no active backend" without
+    colliding with the "use the default" sentinel.
+  - `describe_backends(infos=None) -> list[str]` — pure
+    one-line-per-backend renderer with three independent
+    annotations `(active)` / `(volume)` / `(unavailable)`
+    appended in a fixed order.
+  - `_BACKEND_TO_BINARY` mapping so the new helper doesn't
+    re-implement the `shutil.which` ladder `pick_backend` and
+    `current_backend_name` already use.
+  - `_backend_info_to_dict` + `_active_backend_name` helpers
+    (single source of truth for the JSON shape and the
+    `null`-vs-string top-level field).
+  - `to_json("backends")` extends the existing helper with a
+    3rd kind, emitting
+    `{"active": "afplay"|null, "backends": [...]}` with
+    sorted keys + `ensure_ascii=False`, same one-line /
+    parseable contract `to_json("packs")` and
+    `to_json("events")` already have.
+  - CLI: new `--list-backends` flag (dest=`list_backends`)
+    composes with `--json` exactly the way the existing two
+    discovery flags do. The `--json without any discovery
+    flag` error message is updated to name all three valid
+    flags.
+
+- `tests/test_sound.py` — 26 new tests covering:
+  - 8 `list_backends` low-level tests (cardinality, sort
+    order, `which_fn` injection, `active` exactly-once,
+    explicit-None vs sentinel, `current_backend_name` default,
+    `volume_supported` agreement with module helper).
+  - 1 `BackendInfo` frozen-instance guard.
+  - 6 `describe_backends` low-level tests (the four
+    (active+volume), (unavailable+volume), (volume-only),
+    (nothing) shapes + input-order preservation + empty-list
+    no-phantom).
+  - 5 `to_json("backends")` tests (round-trip, null-active,
+    single-line, key-sort, unknown-kind-message-lists-
+    backends).
+  - 2 `parse_args` tests (default-off, flag-on).
+  - 4 `main()` end-to-end tests (text-mode-list, text-mode-
+    no-banner, text-mode-ignores-event, json-mode-list +
+    json-mode-no-banner).
+  - 1 `main()` regression guard for the updated
+    `--json requires` stderr message.
+
+- `src/whisperpaw/completions/whisperpaw.{bash,zsh,fish,nu}` —
+  regenerated so `--list-backends` shows up in Tab completion
+  for every shell. The byte-identity test in
+  `test_completions.py` caught the drift on first run.
+
+**Why.** `--list-packs` and `--list-events` were the
+existing discovery flags; together they answer "what sound
+packs ship?" and "what event names can I trigger?". The third
+question — "which audio backend would actually play on this
+machine right now?" — was answerable only by running
+`paw-sound ok` and looking at the error message, which is a
+terrible debug experience. `--list-backends` makes the
+audio-side of the tool self-describing the same way the
+content side already is: the user can tell at a glance that
+`paplay` is the active backend on a Linux box, that
+`afplay` is the one that would have been used on a Mac
+without paplay, and that `aplay` does not honour
+`--volume`. The diagnostic value is real even when the
+"expected" backend is in use, because it tells the user
+which other backends are out there and what each one would
+do (e.g. "I could install paplay to get per-stream
+volume").
+
+**What's next.** `paw-sound` is now fully self-describing:
+three discovery flags, all composable with `--json`. The
+content + audio split is well-bounded; the next natural
+small unit on a different tool would be a `paw-watch --list-
+backends`-style introspection for the TTS chain (mirroring
+`paw-read --list-backends` which already exists) — but
+that's actually already shipped under `paw-read`, so a more
+interesting next move is to thread a `paw-sound --dry-run`
+flag through that prints the announce line + the resolved
+audio path without actually playing, the way
+`paw-watch --dry-run` already does. One flag, one helper,
+~12 tests. Or, on a different vector: the
+`paw-watch-session` log-summarising tool sketched in the
+last entry still hasn't shipped. Will pick based on the
+next tick. 🐾

@@ -27,6 +27,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+#: Sentinel used by :func:`list_backends` to distinguish "the caller
+#: did not pass ``active_name``" from "the caller explicitly passed
+#: ``None`` to mean no backend is active". Necessary because
+#: ``None`` is a valid value for ``active_name`` (it means "no audio
+#: backend is installed on this machine") and we cannot use it as
+#: the default. Defined at module top so every helper below can
+#: reference it before its own definition runs.
+_SENTINEL: object = object()
+
 # ---------------------------------------------------------------------------
 # Public data
 # ---------------------------------------------------------------------------
@@ -67,8 +76,18 @@ def list_events() -> list[str]:
 def to_json(kind: str) -> str:
     """Return the requested discovery data as a JSON string.
 
-    ``kind`` is either ``"packs"`` or ``"events"``. The output is a
-    compact, single-line JSON object with one key, so it can be
+    ``kind`` is one of ``"packs"``, ``"events"``, or ``"backends"``:
+        * ``"packs"``    → ``{"packs": [...]}``   (sorted pack names)
+        * ``"events"``   → ``{"events": [...]}``  (canonical order)
+        * ``"backends"`` → ``{"active": ..., "backends": [...]}``
+                           where each backend is a 4-key dict
+                           ``{name, available, volume_supported,
+                           active}`` and the top-level ``active``
+                           mirrors the same field on the active
+                           backend (``null`` when no backend is
+                           installed on this machine).
+
+    The output is a compact, single-line JSON object so it can be
     diffed, piped to ``jq``, or stored as a build artefact without
     further parsing.
 
@@ -78,14 +97,152 @@ def to_json(kind: str) -> str:
         payload = {"packs": list_packs()}
     elif kind == "events":
         payload = {"events": list_events()}
+    elif kind == "backends":
+        infos = list_backends()
+        payload = {
+            "active": _active_backend_name(infos),
+            "backends": [_backend_info_to_dict(info) for info in infos],
+        }
     else:
         raise ValueError(
-            f"unknown kind {kind!r}; expected 'packs' or 'events'"
+            f"unknown kind {kind!r}; expected 'packs', 'events', or 'backends'"
         )
     # ``sort_keys`` keeps the output stable across runs and platforms;
     # ``ensure_ascii=False`` preserves non-ASCII pack / event names
     # verbatim. No indent — the output is meant to be piped to ``jq``.
     return json.dumps(payload, sort_keys=True, ensure_ascii=False)
+
+
+def _backend_info_to_dict(info: BackendInfo) -> dict[str, object]:
+    """Convert a :class:`BackendInfo` to a JSON-serialisable dict.
+
+    The dict shape is the public contract for ``to_json('backends')``:
+    four fixed keys, sorted by :func:`json.dumps` ``sort_keys``, so
+    a downstream consumer can rely on the field set without parsing
+    the help text.
+    """
+    return {
+        "name": info.name,
+        "available": info.available,
+        "volume_supported": info.volume_supported,
+        "active": info.active,
+    }
+
+
+def _active_backend_name(infos: list[BackendInfo]) -> str | None:
+    """Return the name of the single active backend in ``infos``, or
+    ``None`` if none is active.
+
+    Defined here so :func:`to_json` does not have to walk the list
+    twice. The contract is "exactly one active backend in a healthy
+    environment" — on a machine with no audio installed the answer
+    is ``None``; in any other case exactly one entry has
+    ``active == True``.
+    """
+    for info in infos:
+        if info.active:
+            return info.name
+    return None
+
+
+def list_backends(
+    *,
+    which_fn: Callable[[str], str | None] | None = None,
+    active_name: str | None | object = _SENTINEL,
+) -> list[BackendInfo]:
+    """Return one :class:`BackendInfo` per known backend, sorted by name.
+
+    The list always contains every backend in
+    :data:`KNOWN_BACKEND_NAMES` — exactly one entry per name — so a
+    caller can rely on the cardinality. ``available`` reflects
+    whether the backend's binary is on ``$PATH`` *right now* (not
+    whether the OS would normally have it), so on a vanilla Linux
+    box ``afplay`` and ``powershell`` both come back as
+    ``available: False``.
+
+    Parameters are injection points for tests:
+
+    * ``which_fn`` — replaces :func:`shutil.which` so tests can fake
+      which binaries are on ``$PATH`` without touching the host.
+    * ``active_name`` — replaces :func:`current_backend_name` so
+      tests can pin exactly which backend is reported active.
+      Pass the literal ``None`` to simulate "no backend installed";
+      omit it (the default) to call the real
+      :func:`current_backend_name`.
+
+    The order is sorted alphabetically by ``name`` so the JSON
+    output is diffable across runs and platforms.
+    """
+    if which_fn is None:
+        which_fn = shutil.which
+    if active_name is _SENTINEL:
+        active_name = current_backend_name()
+    infos: list[BackendInfo] = []
+    for name in sorted(KNOWN_BACKEND_NAMES):
+        binary = _BACKEND_TO_BINARY[name]
+        available = which_fn(binary) is not None
+        infos.append(
+            BackendInfo(
+                name=name,
+                available=available,
+                volume_supported=volume_supported(name),
+                active=(name == active_name),
+            )
+        )
+    return infos
+
+
+def describe_backends(infos: list[BackendInfo] | None = None) -> list[str]:
+    """Render a list of :class:`BackendInfo` as one fixed-format line each.
+
+    The shape is::
+
+        <name> (active, volume, unavailable)
+        <name> (volume)
+        <name> (active)
+        <name> (unavailable)
+        <name>
+        …
+
+    Annotations are independent facts: ``active`` ("this is the
+    backend currently in use"), ``volume`` ("this backend honours
+    ``--volume``"), and ``unavailable`` ("this backend's binary is
+    not on $PATH right now"). A backend can have any combination
+    of the three — the common case on a healthy macOS host is
+    ``afplay (active, volume)`` with the other three backends
+    listed as ``(unavailable)``. The annotations are emitted in
+    a fixed order (``active`` first, then ``volume``, then
+    ``unavailable``) so the output is diffable across runs and
+    platforms.
+
+    A backend with no annotations renders as a bare name — the
+    "exists in our list and is installed but is not the active
+    one and does not support volume" shape (e.g. an installed
+    but unused ``aplay`` on a system whose active backend is
+    ``paplay``).
+
+    The output is one entry per input, in input order, so a
+    caller can pre-sort the list and the description mirrors
+    that. ``infos`` defaults to :func:`list_backends` so the
+    CLI's text-mode branch can call ``describe_backends()``
+    with no args.
+    """
+    if infos is None:
+        infos = list_backends()
+    lines: list[str] = []
+    for info in infos:
+        parts: list[str] = []
+        if info.active:
+            parts.append("active")
+        if info.volume_supported:
+            parts.append("volume")
+        if not info.available:
+            parts.append("unavailable")
+        if parts:
+            lines.append(f"{info.name} ({', '.join(parts)})")
+        else:
+            lines.append(info.name)
+    return lines
 
 #: File extensions we know how to feed to a system player.
 _AUDIO_EXTS: tuple[str, ...] = (".wav", ".mp3", ".ogg", ".flac")
@@ -169,6 +326,22 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Print the names of every known event, one per line, and exit. "
             "Nothing is played. Useful for discovery and for shell completion."
+        ),
+    )
+    parser.add_argument(
+        "--list-backends",
+        action="store_true",
+        dest="list_backends",
+        help=(
+            "Print the names of every supported audio backend, one per "
+            "line, and exit. Each line is annotated with the backend's "
+            "state on the current machine: ``(active)`` marks the "
+            "backend that would be used to play a sound right now, "
+            "``(volume)`` marks the backends that honour ``--volume``, "
+            "and ``(unavailable)`` marks a backend whose binary is "
+            "not on $PATH. Nothing is played. Useful for diagnosing "
+            "why a sound did not play (``paw-sound --list-backends``) "
+            "or for feeding shell completion."
         ),
     )
     parser.add_argument(
@@ -291,6 +464,19 @@ KNOWN_BACKEND_NAMES: frozenset[str] = frozenset(
     {"afplay", "aplay", "paplay", "powershell"}
 )
 
+#: Maps each backend name to the on-disk binary that backs it. Used by
+#: :func:`list_backends` so the per-backend "is this available?" check
+#: does not have to re-implement the ladder :func:`pick_backend` walks.
+#: A backend is considered "available" if its binary resolves on
+#: ``$PATH`` — same gate :func:`pick_backend` and
+#: :func:`current_backend_name` use, so the three helpers cannot drift.
+_BACKEND_TO_BINARY: dict[str, str] = {
+    "afplay": "afplay",
+    "aplay": "aplay",
+    "paplay": "paplay",
+    "powershell": "powershell",
+}
+
 #: Backend names whose underlying player supports a per-stream
 #: volume flag. ``aplay`` and ``powershell`` are absent because
 #: neither exposes a per-stream volume knob without side effects
@@ -306,6 +492,43 @@ def volume_supported(backend_name: str) -> bool:
     in ``--help`` text; tests use it to assert the contract.
     """
     return backend_name in BACKENDS_WITH_VOLUME
+
+
+#: The metadata for a single audio backend, as exposed by
+#: :func:`list_backends`. Frozen so a caller can safely pass the
+#: object through layers and treat it as an immutable value.
+#:
+#: Fields:
+#:   ``name``              — canonical backend name (one of
+#:                           :data:`KNOWN_BACKEND_NAMES`).
+#:   ``available``         — ``True`` iff the backend's binary is
+#:                           currently on ``$PATH``. Mirrors the
+#:                           gate :func:`pick_backend` uses, so
+#:                           ``available`` is what would actually
+#:                           be picked if a sound were played.
+#:   ``volume_supported``  — ``True`` iff :func:`volume_supported`
+#:                           returns ``True`` for this backend
+#:                           (i.e. the per-stream volume knob is
+#:                           exposed by the underlying player).
+#:   ``active``            — ``True`` iff :func:`current_backend_name`
+#:                           would return this name on the current
+#:                           machine. Exactly one backend can be
+#:                           active at a time; on a host with no
+#:                           audio installed all four are inactive.
+#:
+#: Use :func:`list_backends` to enumerate every backend in a stable
+#: order; the order is sorted alphabetically by ``name`` so the
+#: output is diffable across runs and platforms.
+@dataclass(frozen=True)
+class BackendInfo:
+    """The metadata for a single audio backend, as exposed by
+    :func:`list_backends`."""
+
+    name: str
+    available: bool
+    volume_supported: bool
+    active: bool
+
 
 
 def pick_backend() -> Callable[[PlayPlan], int] | None:
@@ -407,9 +630,10 @@ def main(argv: list[str] | None = None) -> int:
     # Discovery flags short-circuit before any audio resolution — they
     # are mutually exclusive with playing a sound, and they don't need
     # to touch the audio device.
-    if args.as_json and not (args.list_packs or args.list_events):
+    if args.as_json and not (args.list_packs or args.list_events or args.list_backends):
         print(
-            "paw-sound: --json requires --list-packs or --list-events",
+            "paw-sound: --json requires --list-packs, --list-events, "
+            "or --list-backends",
             file=sys.stderr,
         )
         return 2
@@ -426,6 +650,13 @@ def main(argv: list[str] | None = None) -> int:
         else:
             for name in list_events():
                 print(name)
+        return 0
+    if args.list_backends:
+        if args.as_json:
+            print(to_json("backends"))
+        else:
+            for line in describe_backends():
+                print(line)
         return 0
 
     try:

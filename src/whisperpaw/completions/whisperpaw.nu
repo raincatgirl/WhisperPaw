@@ -33,6 +33,7 @@ extern "paw-sound" [
     --quiet: string  # Suppress the announcement line (still plays the sound).
     --list-packs: string  # Print the names of every available sound pack, one per line, and exit.
     --list-events: string  # Print the names of every known event, one per line, and exit.
+    --list-backends: string  # Print the names of every supported audio backend, one per line, and exit.
     --json: string  # Combine with --list-packs or --list-events to emit a JSON object instead of one…
 ]
 
